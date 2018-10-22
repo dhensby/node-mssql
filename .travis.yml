@@ -5,3 +5,19 @@ node_js:
   - "6"
   - "8"
   - "10"
+
+# add build with RELEASE=1
+
+before_deploy:
+  # build docs
+
+deploy:
+  - provider: pages
+    skip_cleanup: true
+    keep_history: true
+    github-token: $GH_TOKEN
+    localdir: release
+    on:
+      tags: true
+      repo: tediousjs/node-mssql
+      condition: -n $RELEASE

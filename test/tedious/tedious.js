@@ -81,6 +81,7 @@ describe('tedious', () => {
     it('transaction accepts good isolation levels', done => TESTS['transaction accepts good isolation levels'](done))
     it('transaction with error (XACT_ABORT set to ON)', done => TESTS['transaction with error'](done))
     it('transaction with synchronous error', done => TESTS['transaction with synchronous error'](done))
+    it('transaction with pseudo parallel execution', done => TESTS['transaction with pseudo parallel execution'](done))
     it('cancel request', done => TESTS['cancel request'](done, /Canceled./))
     it('allows repeat calls to connect', done => TESTS['repeat calls to connect resolve'](config(), done))
     it('calls to close during connection throw', done => TESTS['calls to close during connection throw'](config(), done))

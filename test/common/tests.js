@@ -820,6 +820,22 @@ module.exports = (sql, driver) => {
       }).catch(done)
     },
 
+    'transaction with pseudo parallel execution' (done) {
+      const tran = new TestTransaction()
+      tran.begin().then(() => {
+        const req = tran.request()
+        return Promise.all([
+          req.query('SELECT 1').then(() => Date.now()),
+          req.query('SELECT 2').then(() => Date.now())
+        ])
+      }).then(([time1, time2]) => {
+        assert.ok(time1 < time2, 'Queries did not execute in order')
+        return tran.rollback().then(() => done())
+      }).catch((err) => {
+        return tran.rollback().then(() => done(err))
+      })
+    },
+
     'cancel request' (done, message) {
       const req = new TestRequest()
       req.query('waitfor delay \'00:00:05\';select 1').catch(err => {

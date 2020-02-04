@@ -82,6 +82,8 @@ describe('msnodesqlv8', function () {
     it('transaction with commit', done => TESTS['transaction with commit'](done))
     it('transaction throws on bad isolation level', done => TESTS['transaction throws on bad isolation level'](done))
     it('transaction accepts good isolation levels', done => TESTS['transaction accepts good isolation levels'](done))
+    it('transaction with error (XACT_ABORT set to ON)', done => TESTS['transaction with error'](done))
+    it('transaction with synchronous error', done => TESTS['transaction with synchronous error'](done))
     it('transaction with pseudo parallel execution', done => TESTS['transaction with pseudo parallel execution'](done))
     it('cancel request', done => TESTS['cancel request'](done))
     it('allows repeat calls to connect', done => TESTS['repeat calls to connect resolve'](config(), done))

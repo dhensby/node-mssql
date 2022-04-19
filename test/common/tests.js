@@ -588,6 +588,17 @@ module.exports = (sql, driver) => {
       }).catch(done)
     },
 
+    'query with duplicate output column names without arrayRowMode' (done) {
+      const req = new TestRequest()
+      req.query('select \'asdf\' as name, \'jkl\' as name').then(result => {
+        assert.strictEqual(result.recordset.length, 1)
+        assert.ok(result.recordset[0].name instanceof Array)
+        assert.strictEqual(result.recordset[0].name[0], 'asdf')
+        assert.strictEqual(result.recordset[0].name[1], 'jkl')
+        done()
+      }).catch(done)
+    },
+
     'batch' (done, stream) {
       const req = new TestRequest()
       req.batch('select 1 as num;select \'asdf\' as text').then(result => {
@@ -1171,7 +1182,11 @@ module.exports = (sql, driver) => {
       const req = new TestRequest()
       req.input('image', sql.VarBinary, 'asdf')
       req[mode]('select * from @image').catch(err => {
-        assert.strictEqual(err.message, "Validation failed for parameter 'image'. Invalid buffer.")
+        if (driver === 'msnodesqlv8') {
+          assert.strictEqual(err.message, 'Must declare the table variable "@image".')
+        } else {
+          assert.strictEqual(err.message, "Validation failed for parameter 'image'. Invalid buffer.")
+        }
 
         done()
       }).catch(done)
@@ -1333,9 +1348,14 @@ module.exports = (sql, driver) => {
         password: '...',
         server: '...'
       }, (err) => {
-        assert.strictEqual((message ? (message.exec(err.message) != null) : (err instanceof sql.ConnectionPoolError)), true)
-        conn.close()
-        done()
+        try {
+          assert.strictEqual((message ? (message.exec(err.message) != null) : (err instanceof sql.ConnectionPoolError)), true)
+          done()
+        } catch (e) {
+          done(e)
+        } finally {
+          conn.close()
+        }
       })
     },
 

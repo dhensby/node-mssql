@@ -64,11 +64,13 @@ describe('msnodesqlv8', function () {
     it('query with duplicate parameters throws', done => TESTS['query with duplicate parameters throws'](done))
     it('query parameters can be replaced', done => TESTS['query parameters can be replaced'](done))
     it('query with error', done => TESTS['query with error'](done))
-    it('query with multiple errors (not supported by msnodesqlv8)', done => TESTS['query with multiple errors'](done))
+    it('query with multiple errors', done => TESTS['query with multiple errors'](done))
     it.skip('query with raiseerror (not supported by msnodesqlv8)', done => TESTS['query with raiseerror'](done))
     it('query with toReadableStream', done => TESTS['query with toReadableStream'](done))
     it('query with pipe', done => TESTS['query with pipe'](done))
     it('query with pipe and back pressure', (done) => TESTS['query with pipe and back pressure'](done))
+    it('query with duplicate output column names', done => TESTS['query with duplicate output column names'](done))
+    it('query with duplicate output column names without arrayRowMode', done => TESTS['query with duplicate output column names without arrayRowMode'](done))
     it('batch', done => TESTS.batch(done))
     it('batch (stream)', done => TESTS.batch(done, true))
     it('create procedure batch', done => TESTS['create procedure batch'](done))
@@ -84,6 +86,8 @@ describe('msnodesqlv8', function () {
     it('transaction throws on bad isolation level', done => TESTS['transaction throws on bad isolation level'](done))
     it('transaction accepts good isolation levels', done => TESTS['transaction accepts good isolation levels'](done))
     it('transaction uses default isolation level', done => TESTS['transaction uses default isolation level'](done))
+    it('transaction with error (XACT_ABORT set to ON)', done => TESTS['transaction with error'](done))
+    it('transaction with synchronous error', done => TESTS['transaction with synchronous error'](done))
     it('cancel request', done => TESTS['cancel request'](done))
     it('allows repeat calls to connect', done => TESTS['repeat calls to connect resolve'](config(), done))
     it('calls to close during connection throw', done => TESTS['calls to close during connection throw'](config(), done))
@@ -91,6 +95,8 @@ describe('msnodesqlv8', function () {
     it('healthy connection goes bad', done => TESTS['healthy connection goes bad'](config(), done))
     it('request timeout', done => TESTS['request timeout'](done))
     it('dataLength type correction', done => TESTS['dataLength type correction'](done))
+    it('type validation', done => TESTS['type validation']('query', done))
+    it('type validation (batch)', done => TESTS['type validation']('batch', done))
     it('chunked xml support', done => TESTS['chunked xml support'](done))
 
     after(() => sql.close())
@@ -180,7 +186,7 @@ describe('msnodesqlv8', function () {
 
   describe('msnodesqlv8 connection errors', function () {
     it('login failed', done => TESTS['login failed'](done, /Login failed for user '(.*)'\./))
-    it.skip('timeout (not supported by msnodesqlv8)', done => TESTS.timeout.call(this, done, /1000ms/))
+    it.skip('timeout (not supported by msnodesqlv8)', function (done) { TESTS.timeout.call(this, done, /Failed to connect to 10.0.0.1:1433 in 1000ms/) })
     it.skip('network error (not supported by msnodesqlv8)', done => TESTS['network error'](done))
   })
 
@@ -195,7 +201,7 @@ describe('msnodesqlv8', function () {
 
     it('max 10', done => TESTS['max 10'](done, connection1))
     it('max 1', done => TESTS['max 1'](done, connection2))
-    it.skip('interruption (not supported by msnodesqlv8)', done => TESTS.interruption(done, connection1, connection2))
+    it('interruption (not supported by msnodesqlv8)', done => TESTS.interruption(done, connection1, connection2))
 
     after(function () {
       connection1.close()

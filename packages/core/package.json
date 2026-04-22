@@ -24,7 +24,6 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true});require('node:fs').rmSync('dist-test',{recursive:true,force:true})\""
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
     "typescript": "^6.0.3"
   },
   "repository": {

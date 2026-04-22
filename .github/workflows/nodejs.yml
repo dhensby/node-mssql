@@ -159,7 +159,11 @@ jobs:
   release:
     name: Release
     concurrency: release
-    if: ${{ github.repository_owner == 'tediousjs' && github.event_name == 'push' && github.actor != 'dependabot[bot]' }}
+    # The `next-major` exclusion disables semantic-release on the v13 rewrite branch during
+    # early development, to avoid publishing pre-releases before the library is ready for
+    # external adopters. Remove the `github.ref != 'refs/heads/next-major'` clause when we
+    # want to start shipping `13.0.0-next-major.N` alpha releases. See docs/adr/0002-branch-strategy.md.
+    if: ${{ github.repository_owner == 'tediousjs' && github.event_name == 'push' && github.actor != 'dependabot[bot]' && github.ref != 'refs/heads/next-major' }}
     runs-on: ubuntu-24.04
     needs:
       - commitlint

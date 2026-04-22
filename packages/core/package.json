@@ -1,0 +1,43 @@
+{
+  "name": "@tediousjs/mssql-core",
+  "version": "13.0.0-next-major.0",
+  "description": "Kernel for the @tediousjs/mssql-* family. Drivers and pool adapters peer-depend on this package.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.3.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "build:test": "tsc -b tsconfig.test.json",
+    "test": "npm run build:test && find dist-test/test -type f -name '*.test.js' -exec node --test {} +",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true});require('node:fs').rmSync('dist-test',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^6.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tediousjs/node-mssql.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/tediousjs/node-mssql#readme",
+  "bugs": {
+    "url": "https://github.com/tediousjs/node-mssql/issues"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

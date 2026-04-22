@@ -49,6 +49,34 @@ jobs:
         run: npm clean-install
       - name: Lint code
         run: npm run lint
+  test-workspaces:
+    name: Build & test workspaces (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    needs:
+      - commitlint
+      - codelint
+    strategy:
+      matrix:
+        # Matches the core engines field (>=20.3.0) — Node 18 is intentionally
+        # excluded because the v13 rewrite targets the AbortSignal.any / native
+        # diagnostics_channel.tracingChannel surface that only stabilised in 20.3+.
+        node: [20.x, 22.x, 24.x]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm clean-install
+      - name: Build workspaces
+        run: npm run build:workspaces
+      - name: Test workspaces
+        run: npm run test:workspaces
   test-linux:
     name: Run tests
     runs-on: ${{ matrix.os }}
@@ -168,6 +196,7 @@ jobs:
     needs:
       - commitlint
       - codelint
+      - test-workspaces
       - test-linux
       - test-windows
     permissions:

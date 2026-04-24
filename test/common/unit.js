@@ -1401,5 +1401,22 @@ describe('connection string auth - tedious', () => {
         assert.strictEqual(ps.overrides.requestTimeout, undefined)
       })
     })
+
+    describe('PreparedStatement streaming', () => {
+      it('execute does not throw when stream=true and no callback provided', (done) => {
+        const pool = new ConnectionPool({ server: 'localhost' })
+        const ps = new BasePreparedStatement(pool)
+        ps.stream = true
+        ps.prepared = true
+        ps._handle = 1
+
+        // Should not throw TypeError — returns the inner Request
+        const req = ps.execute({})
+        assert.ok(req, 'execute() should return the inner Request')
+        // The request will error (no connection) — that's fine,
+        // the point is it doesn't throw TypeError
+        req.on('error', () => done())
+      })
+    })
   })
 })

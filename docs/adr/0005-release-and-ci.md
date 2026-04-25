@@ -23,14 +23,16 @@ We also need automated dependency updates across every workspace package's `pack
 
 ### Pre-release branch
 
-The v13 work lives on a long-lived branch named **`next-major`** in `tediousjs/node-mssql`. The name is inherited from the `semantic-release` default convention this repo was originally configured for. We are no longer using `semantic-release` for v13 (see "Release tooling" below), but the branch name is kept deliberately:
-
-- `next-major` is a conventional name for "the next major version's pre-release branch" and communicates intent to contributors landing on the repo without further explanation.
-- Branch lifecycle and merge semantics are owned by [ADR-0002](0002-branch-strategy.md); ADR-0002 is deliberately branch-name-agnostic so the choice stays reversible without invalidating that ADR.
+The v13 work lives on a long-lived branch named **`next-major`** in `tediousjs/node-mssql`. The name is inherited from the `semantic-release` default convention this repo was originally configured for; although v13 work no longer uses `semantic-release` (see "Release tooling" below), `next-major` is a conventional name across the npm ecosystem for "the next major version's pre-release branch" and communicates intent to contributors landing on the repo without further explanation.
 
 ### Release tooling: `release-please` in manifest mode
 
-Run `release-please` via `googleapis/release-please-action` in *manifest mode* — the multi-package release model release-please was built for. Configuration lives in `.github/release-please-config.json`; current per-package versions live in `.release-please-manifest.json` (release-please writes to it on every release).
+Run `release-please` via `googleapis/release-please-action` in **manifest mode**. Manifest mode is release-please's multi-package configuration model: instead of treating the repo as one package and inferring everything from the root, two files describe the layout explicitly.
+
+- `.github/release-please-config.json` — declares each package: its path under `packages/` (or `mssql/` for the meta), its release type (`node`), its prerelease and changelog options. Maintained by hand.
+- `.release-please-manifest.json` — records the current released version of each package. release-please writes to it as part of every release PR; it is the source of truth for "what version is each package on right now".
+
+The alternative ("simple" mode) treats the repo as one package and does not support independent per-package versions, which is incompatible with the monorepo ([ADR-0004](0004-monorepo-layout.md)).
 
 Rules:
 
@@ -38,8 +40,7 @@ Rules:
 - **One release PR per package.** When a branch has unreleased commits in a package's path, release-please opens or updates a `chore(<pkg>): release <version>` PR. Merging the PR cuts the tag, generates the changelog entry, and triggers a paired npm-publish job. No human is asked for a version number.
 - **Per-package tags and changelogs.** Tags follow `<package-name>-v<version>` (e.g. `mssql-core-v13.2.0`). Each package owns its own `CHANGELOG.md`.
 - **Phased pre-releases.** `prerelease: true` is set in release-please's config; the `prerelease-type` field drives the phase identifier (`alpha`, `beta`, `rc`). See the "Pre-release lifecycle" subsection below for what each phase signals and how transitions work.
-- **The release-please job runs from day one.** It opens and updates release PRs throughout the rewrite so the changelog assembles in real time and the team can sanity-check what a release would look like at any point.
-- **The npm-publish step is gated** behind a workflow conditional. While the gate is closed, release-please keeps release PRs up to date but no version is published to npm — useful during the rewrite to see what releases would look like without producing artefacts nobody can yet consume. The gate is lifted when we are ready to begin the alpha phase (see "Pre-release lifecycle"). The conditional is documented inline in `.github/workflows/release-next-major.yml` and is lifted by flipping a single boolean.
+- **The release-please workflow is gated until we begin the alpha phase.** The workflow file lives in the repo, but the entire job (release PR generation and npm-publish) is wrapped in a workflow conditional that defaults to off. While off, release-please does not run on push — no release PRs accumulate and nothing publishes to npm. The gate is flipped on when the project has made enough progress that cutting alpha releases makes sense (see "Pre-release lifecycle"). The conditional is documented inline in `.github/workflows/release-next-major.yml` and is flipped by changing a single boolean.
 - **`master` continues to use `semantic-release`** for v12 maintenance until the v13.0 merge. After the merge, `master`'s release tooling switches to release-please as well, with the prerelease config swapped for stable.
 
 ### Conventional-Commit policy

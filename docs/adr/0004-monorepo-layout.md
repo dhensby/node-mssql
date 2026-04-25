@@ -1,6 +1,6 @@
 # ADR-0004: Monorepo with npm workspaces and `@tediousjs/mssql-*` scope
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-22
 - **Deciders:** @dhensby
 

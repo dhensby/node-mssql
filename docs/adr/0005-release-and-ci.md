@@ -25,7 +25,6 @@ We also need automated dependency updates across every workspace package's `pack
 
 The v13 work lives on a long-lived branch named **`next-major`** in `tediousjs/node-mssql`. The name is inherited from the `semantic-release` default convention this repo was originally configured for. We are no longer using `semantic-release` for v13 (see "Release tooling" below), but the branch name is kept deliberately:
 
-- Renaming a long-lived branch mid-rewrite is gratuitous churn for contributors and tooling.
 - `next-major` is a conventional name for "the next major version's pre-release branch" and communicates intent to contributors landing on the repo without further explanation.
 - Branch lifecycle and merge semantics are owned by [ADR-0002](0002-branch-strategy.md); ADR-0002 is deliberately branch-name-agnostic so the choice stays reversible without invalidating that ADR.
 

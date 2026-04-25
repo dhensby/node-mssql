@@ -1,6 +1,6 @@
 # ADR-0002: Same-repo pre-release branch strategy
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-22
 - **Deciders:** @dhensby
 

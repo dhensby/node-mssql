@@ -1,6 +1,6 @@
 # ADR-0003: Runtime targets — ESM, TypeScript 6+, Node 20+
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-22
 - **Deciders:** @dhensby
 

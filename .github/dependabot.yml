@@ -1,18 +1,20 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
+# See docs/adr/0005-release-and-ci.md for the broader rationale.
+#
+# Dependabot reads this file from the repository's default branch (`master`).
+# The v13 monorepo entries below carry `target-branch: next-major` so that —
+# once this config lands on `master` — dependabot opens workspace-package PRs
+# against the `next-major` branch. Until that one-time sync, the v13 entries
+# are inert.
 
 version: 2
+
 updates:
-  - package-ecosystem: "github-actions"
+  # ─── v12 maintenance (master) ─────────────────────────────────────────────
+  # Root npm deps for v12. Removed when v13.0 ships and v12 maintenance ends.
+  - package-ecosystem: npm
     directory: "/"
     schedule:
-      interval: "monthly"
-  - package-ecosystem: "npm" # See documentation for possible values
-    directory: "/" # Location of package manifests
-    schedule:
-      interval: "weekly"
+      interval: weekly
     groups:
       release-tools:
         patterns:
@@ -25,3 +27,60 @@ updates:
       lint-tools:
         patterns:
           - "standard"
+
+  # ─── v13 monorepo (next-major) ────────────────────────────────────────────
+  # Workspace packages plus the meta `mssql/` directory once the meta package
+  # bootstraps. The `/packages/*` glob picks up new workspace packages
+  # automatically — no per-package config maintenance.
+  - package-ecosystem: npm
+    directories:
+      - "/"
+      - "/packages/*"
+      - "/mssql"
+    target-branch: next-major
+    schedule:
+      interval: weekly
+    groups:
+      types:
+        patterns:
+          - "@types/*"
+      commitlint:
+        patterns:
+          - "@commitlint/*"
+      typescript:
+        patterns:
+          - "typescript"
+          - "@typescript-eslint/*"
+          - "@tsconfig/*"
+      test-tools:
+        patterns:
+          - "mocha"
+          - "@types/mocha"
+      lint-tools:
+        patterns:
+          - "standard"
+          - "eslint"
+          - "@eslint/*"
+
+  # ─── GitHub Actions (master) ──────────────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      release-please-action:
+        patterns:
+          - "googleapis/release-please-action"
+
+  # ─── GitHub Actions (next-major) ──────────────────────────────────────────
+  # Action-version updates for workflows that only exist on the rewrite branch
+  # (e.g. release-next-major.yml). Inert until this config lands on master.
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: next-major
+    schedule:
+      interval: monthly
+    groups:
+      release-please-action:
+        patterns:
+          - "googleapis/release-please-action"

@@ -27,7 +27,7 @@ Each ADR is a short (~1 page) record of a decision we've made and *why*, intende
 ## Index
 
 - [ADR-0001: Scope and goals of the v13 rewrite](0001-scope-and-goals.md)
-- [ADR-0002: Same-repo `next-major` branch strategy](0002-branch-strategy.md)
+- [ADR-0002: Same-repo pre-release branch strategy](0002-branch-strategy.md)
 - [ADR-0003: Runtime targets — ESM, TypeScript 6+, Node 20+](0003-runtime-targets.md)
 - [ADR-0004: Monorepo with npm workspaces and `@tediousjs/mssql-*` scope](0004-monorepo-layout.md)
 - [ADR-0005: Release process, CI workflows, and dependency automation](0005-release-and-ci.md)

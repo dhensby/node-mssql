@@ -43,7 +43,6 @@ Rules:
 
 - `npm i mssql` continues to work unchanged for zero-config users.
 - Power users do `npm i @tediousjs/mssql-core @tediousjs/mssql-msnodesqlv8 @tediousjs/mssql-tarn` and configure their client directly. Meta package becomes optional.
-- **Independent versioning means honest version numbers and minimal lockfile churn for downstream consumers.** A `fix(pool-tarn): …` does not republish `mssql-core`. The trade-off is that the v13 line no longer has a single "version of everything" — see [ADR-0005](0005-release-and-ci.md) for how per-package changelogs and the meta package's caret ranges keep the install story coherent.
 - Tree-shaking and install-size win: a user who wants only tedious does not install msnodesqlv8's native binary, and vice versa.
 - New drivers can ship as third-party packages — the shape is exactly what first-party drivers use.
 - Users with multiple copies of core installed (e.g. via `npm link`) will encounter `instanceof` identity problems. Peer-dep discipline and a CI check that drivers have no direct dep on core mitigate this.

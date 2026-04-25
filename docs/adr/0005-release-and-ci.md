@@ -50,19 +50,6 @@ Two distinct things drive release-please:
 - **Commit type** — `feat:` / `fix:` / `perf:` / `!` (or `BREAKING CHANGE:` in the body) — determines the version bump (minor / patch / patch / major). Type is enforced in CI by commitlint.
 - **Changed paths** — which files the commit modified — determine which package(s) are affected. release-please walks `git log` for each package's directory in `.github/release-please-config.json` and considers only commits that touched files there.
 
-The conventional-commit **scope** is *not* what associates commits with packages — that is path-based, not message-based. Scope is a human-readable label that helps reviewers see at a glance which package a commit is intended to affect, and it groups changelog entries cleanly. We encourage scopes that match the package directory (e.g. `feat(core): …`, `fix(pool-tarn): …`) but **do not enforce them in CI**: a contributor who omits or mistypes the scope still gets a correct release because release-please reads the paths. The commitlint config deliberately omits a strict `scope-enum` rule — requiring contributors to memorise an exact scope vocabulary is friction we get nothing for.
-
-Recommended scopes (match these to the directory the commit changes):
-
-| Scope                  | Package directory                      |
-|------------------------|----------------------------------------|
-| `core`                 | `packages/core`                        |
-| `driver-tedious`       | `packages/driver-tedious`              |
-| `driver-msnodesqlv8`   | `packages/driver-msnodesqlv8`          |
-| `pool-tarn`            | `packages/pool-tarn`                   |
-| `meta`                 | `mssql/`                               |
-| `release`, `deps`, `ci`, `docs`, `monorepo`, `adr` | non-package commits; typically touch no package directory and produce no version bump |
-
 Cross-cutting changes that touch multiple package directories result in multiple packages being bumped automatically — there is no need to split such commits to "trigger" the right packages. Splitting is preferred for *changelog clarity*, not correctness. A coordinated cross-package break uses `!` or `BREAKING CHANGE:` and release-please majors every affected package together.
 
 ### Pre-release lifecycle
@@ -82,7 +69,7 @@ Each phase has a purpose: alphas exist to gather feedback, betas exist to flush 
 
 ### Meta package dependency pinning
 
-The `mssql` meta package uses **caret ranges** (`^13.x.y`) on its `@tediousjs/mssql-*` deps, not exact pins. The npm resolver is free to pick up patch and minor updates without forcing a meta republish. When a material change warrants a new meta floor (e.g. a new feature in `mssql-core` that the meta should expose by default), the floor is bumped explicitly via a `feat(meta):` or `fix(meta):` commit. This keeps the meta's release cadence honest without over-pinning.
+The `mssql` meta package uses **caret ranges** (`^13.x.y`) on its `@tediousjs/mssql-*` deps, not exact pins. The npm resolver is free to pick up patch and minor updates without forcing a meta republish. When a material change warrants a new meta floor (e.g. a new feature in `mssql-core` that the meta should expose by default), the floor is bumped by a commit that touches `mssql/` (typically a `package.json` dep range update). This keeps the meta's release cadence honest without over-pinning.
 
 ### CI workflow layout
 
@@ -107,10 +94,10 @@ A practical caveat: Dependabot reads its config from the repository's **default 
 
 ## Consequences
 
-- **Independent versioning means honest version numbers.** A `fix(pool-tarn): …` commit bumps only `@tediousjs/mssql-tarn`. `mssql-core` does not republish for a pool-adapter fix it had no part in.
-- **The meta `mssql` package republishes only when a `feat(meta):` / `fix(meta):` warrants it.** Caret-range absorption of upstream patch/minor releases happens at install time without a republish.
+- **Independent versioning means honest version numbers.** A change confined to `packages/pool-tarn/` bumps only `@tediousjs/mssql-tarn`. `mssql-core` does not republish for a pool-adapter fix it had no part in.
+- **The meta `mssql` package republishes only when changes to `mssql/` warrant it.** Caret-range absorption of upstream patch/minor releases happens at install time without a republish.
 - **Per-package changelogs** make per-package release notes easy to find. Users tracking only `mssql-core` see only its history.
-- **Conventional-Commit type discipline is enforced in CI** via commitlint. Scope discipline is recommended (matching scopes to package directories aids changelog readability) but not enforced — release routing depends on changed paths, not on the message scope. Existing commit history on `next-major` already follows the convention by habit; type drift is a commitlint failure, but a typo or omitted scope is harmless.
+- **Conventional-Commit type discipline is enforced in CI** via commitlint. Type drift is a commitlint failure.
 - **Pre-releases follow a phased alpha → beta → rc → stable lifecycle**, with the phase encoded in the version (`13.0.0-alpha.N`, `13.0.0-beta.N`, `13.0.0-rc.N`). Consumers install by version, not by a stable dist-tag — see "Pre-release lifecycle" above.
 - **Dependabot covers every workspace package automatically as new ones bootstrap.** No per-package config maintenance required — the `/packages/*` glob handles it.
 - **The Dependabot config landing on `next-major` only takes effect once it also lands on `master`.** A one-time sync; once both branches carry the same config, workspace updates flow correctly. Documented above.

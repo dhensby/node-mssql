@@ -15,7 +15,7 @@ The rewrite ([ADR-0001](0001-scope-and-goals.md)) is long-running and will live 
 
 ## Decision
 
-Work happens on a long-lived **pre-release branch** in the existing `tediousjs/node-mssql` repository. The specific branch name is a contributor-facing convention with no design weight; what matters is that pushes to it produce pre-release versions on a non-default npm dist-tag, never `latest`. Release tooling, the dist-tag name, and npm-publish gating are out of scope here and deferred to [ADR-0005](0005-release-and-ci.md).
+Work happens on a long-lived **pre-release branch** in the existing `tediousjs/node-mssql` repository. The specific branch name is a contributor-facing convention with no design weight; what matters is that pushes to it produce pre-release versions on a non-default npm dist-tag, never `latest`. Release tooling, the dist-tag name, and npm-publish gating are out of scope here.
 
 `master` continues to publish `v12.x` on `latest` (the v12 release pipeline is unchanged during the rewrite).
 
@@ -40,4 +40,3 @@ When v13 reaches stable, the pre-release branch is **merged into `master`** (wit
 ## References
 
 - [ADR-0001: Scope and goals of the v13 rewrite](0001-scope-and-goals.md)
-- [ADR-0005: Release process, CI workflows, and dependency automation](0005-release-and-ci.md) — release tooling, dist-tag selection, and publish gating for the pre-release branch.

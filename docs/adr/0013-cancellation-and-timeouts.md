@@ -32,7 +32,7 @@ Behaviour when a signal aborts:
 
 1. Core calls the driver's cancel path ([ADR-0010](0010-driver-port.md)) — `request.cancel()` on tedious, equivalent on msnodesqlv8.
 2. The terminal rejects with an `AbortError` (`name: 'AbortError'`, matching `fetch` / Node convention).
-3. Core emits `mssql:query:aborted` on `diagnostics_channel` ([ADR-0014](0014-diagnostics.md)).
+3. Core emits `mssql:query:aborted` on `diagnostics_channel`.
 4. The connection is returned to the pool marked "used." The default session-reset behaviour on release ([ADR-0011](0011-pool-port.md) / issue #1483) will `sp_reset_connection` before the next acquire.
 
 ### Single default timeout — "time to first response byte"
@@ -92,7 +92,7 @@ Individual terminals inside a transaction may still override with their own `.si
 - Driver cancel semantics vary (TDS cancel is cooperative; ODBC's is a blocking call). Wrapping both behind `AbortSignal` smooths this over — drivers expose `cancel` as part of the port ([ADR-0010](0010-driver-port.md)) and core is the one orchestrating.
 - Streaming workloads (`for await`, `.iterate()`) are not killed by a hidden whole-query timer. Users paging through large result sets do not have to hunt for and raise a `requestTimeout` setting; the default deadline disarms on first byte. A streamed query runs as long as the user keeps consuming, and per-call `.signal()` is the explicit opt-in for a whole-lifetime deadline.
 - Diagnostics subscribers can distinguish timeout origin via `mssql:query:aborted`'s `reason` field: `'response-start-timeout'` (library default), `'user-abort'` (user signal), `'early-terminate'` (library-initiated from `.one()` / `for await` break), or `'error'`. Operational dashboards that page on timeouts can filter out library-initiated `early-terminate` events cleanly.
-- For the `'user-abort'` case specifically, the channel also carries `signalReason` — the raw `signal.reason`. `AbortSignal.timeout()` produces a `DOMException` with `name: 'TimeoutError'`; `controller.abort()` with no argument produces a `DOMException` with `name: 'AbortError'`; `controller.abort(customReason)` propagates whatever the consumer passed. This lets subscribers distinguish "user-driven whole-query deadline" from "HTTP client disconnected" from "application-defined custom signal" without the library having to enumerate those cases as `reason` values. The same value is on the thrown error's `.cause` ([ADR-0017](0017-error-taxonomy.md)), so catch-site code and diagnostics subscribers see identical classification data.
+- For the `'user-abort'` case specifically, the channel also carries `signalReason` — the raw `signal.reason`. `AbortSignal.timeout()` produces a `DOMException` with `name: 'TimeoutError'`; `controller.abort()` with no argument produces a `DOMException` with `name: 'AbortError'`; `controller.abort(customReason)` propagates whatever the consumer passed. This lets subscribers distinguish "user-driven whole-query deadline" from "HTTP client disconnected" from "application-defined custom signal" without the library having to enumerate those cases as `reason` values. The same value is on the thrown error's `.cause`, so catch-site code and diagnostics subscribers see identical classification data.
 
 ## Alternatives considered
 
@@ -114,5 +114,4 @@ Individual terminals inside a transaction may still override with their own `.si
 - [ADR-0006: Unified queryable API](0006-queryable-api.md) — `.signal()` chain position.
 - [ADR-0010: Driver port](0010-driver-port.md) — `execute(req, signal)` on `Connection`.
 - [ADR-0011: Pool port](0011-pool-port.md) — `acquire(signal)` on `Pool`.
-- [ADR-0014: Diagnostics](0014-diagnostics.md) — `mssql:query:aborted` event.
 - [tediousjs/node-mssql#1529](https://github.com/tediousjs/node-mssql/issues/1529) — per-request timeout request.

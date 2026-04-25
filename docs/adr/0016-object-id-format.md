@@ -48,7 +48,7 @@ Using WebCrypto's `getRandomValues` rather than Node's `crypto.randomBytes` is a
 IDs appear in:
 
 - `diagnostics_channel` context on every event ([ADR-0014](0014-diagnostics.md)).
-- `MssqlError.connectionId` / `.queryId` / etc. on every thrown error ([ADR-0017: Error taxonomy](0017-error-taxonomy.md)).
+- `MssqlError.connectionId` / `.queryId` / etc. on every thrown error.
 - `toString()` on every object (`ConnectionPool#<pool_a3f2b19c_1>`).
 
 ### Override
@@ -101,5 +101,4 @@ This covers Kubernetes users who want pod-scoped IDs, anyone wanting UUIDs for e
 
 - [ADR-0003: Runtime targets](0003-runtime-targets.md) — the Node/Deno/Bun/edge surface that motivates using WebCrypto here.
 - [ADR-0014: Diagnostics](0014-diagnostics.md) — the primary consumer of these IDs.
-- [ADR-0017: Error taxonomy](0017-error-taxonomy.md) — IDs attached to thrown errors.
 - [WebCrypto `getRandomValues`](https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues)

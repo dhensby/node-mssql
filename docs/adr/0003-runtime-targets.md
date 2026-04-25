@@ -9,7 +9,7 @@
 v12 targets Node 18+, ships CommonJS, and is authored in JavaScript with JSDoc. None of these choices fit a 2026 greenfield library:
 
 - TypeScript-native source is necessary for the strict compile-time guarantees we want on parameter typing, prepared-statement generics, and stored-procedure output types.
-- `AsyncDisposable` (explicit resource management, `await using`) is central to the v13 API ([ADR-0006](0006-queryable-api.md), [ADR-0008](0008-query-lifecycle-and-disposal.md)).
+- `AsyncDisposable` (explicit resource management, `await using`) is central to the v13 API.
 - `AbortSignal.any()` is used extensively for cancellation and timeout composition.
 - `diagnostics_channel.tracingChannel` is our observability spine.
 - Publishing dual CommonJS + ESM has a high ongoing cost (build pipeline, subtle interop bugs, doubled instance identity) and a declining benefit.
@@ -45,7 +45,7 @@ The principle we are operating under: **do not exclude older Node versions witho
 
 **Dual CJS + ESM publishing.** Considered because some consumers remain on CJS. Rejected: the dual-publish pattern has well-known hazards (double package instances, incompatible `instanceof` checks across the boundary), maintenance cost is permanent, and the value is temporary.
 
-**JavaScript + JSDoc (like v12).** Rejected. The compile-time guarantees we want on parameter types ([ADR-0006](0006-queryable-api.md)) are not expressible in JSDoc without pain.
+**JavaScript + JSDoc (like v12).** Rejected. The compile-time guarantees we want on parameter types are not expressible in JSDoc without pain.
 
 **Bump the Node floor in minor releases.** Some libraries treat dropping an EOL Node version as additive (the new minimum is always available on supported runtimes) and ship the bump in a minor. Rejected for this library: a floor bump is a breaking change for users still pinned to the dropped version, full stop. `engines.node` enforcement either fails their `npm install` outright (with `engine-strict=true`, common in CI) or — worse — installs silently and surfaces as runtime errors when missing APIs are called. Either failure mode is exactly what semver-major exists to signal. Shipping floor bumps as majors is more expensive for us (we publish majors less often) and that is the point: it disciplines the decision and gives consumers a predictable upgrade path. There is no use case for a "surprise" floor bump in a minor that benefits users.
 
@@ -54,4 +54,3 @@ The principle we are operating under: **do not exclude older Node versions witho
 - [Node.js release schedule](https://nodejs.org/en/about/previous-releases)
 - [TC39 Explicit Resource Management proposal](https://github.com/tc39/proposal-explicit-resource-management)
 - [ADR-0001: Scope and goals of the v13 rewrite](0001-scope-and-goals.md)
-- [ADR-0006: Unified queryable API](0006-queryable-api.md)

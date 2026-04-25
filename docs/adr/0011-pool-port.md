@@ -32,7 +32,7 @@ interface PooledConnection extends AsyncDisposable {
 }
 ```
 
-`state` is observable by the client as a property on the pool. The client's dispatcher reads it to gate entry points as a fast path; if the pool's state changes mid-acquire, the adapter throws `PoolClosedError` at the port boundary and the client wraps it as `ClientClosedError` for consumers (see [ADR-0017](0017-error-taxonomy.md)). Pool and client each own their own error vocabulary; there is no leakage across the domain boundary.
+`state` is observable by the client as a property on the pool. The client's dispatcher reads it to gate entry points as a fast path; if the pool's state changes mid-acquire, the adapter throws `PoolClosedError` at the port boundary and the client wraps it as `ClientClosedError` for consumers. Pool and client each own their own error vocabulary; there is no leakage across the domain boundary.
 
 The `pool` option to `createClient` is a **factory**, not a constructed pool, so core can pass the adapter its context (driver, hooks, id generator) at the same moment it hands the adapter to the client:
 
@@ -56,9 +56,9 @@ Core ships exactly one built-in pool implementation (`SingleConnectionPool`) and
 
 ### Cancellation contract: signal-driven, adapters do not own timeouts
 
-`pool.acquire(signal)` respects the inbound `AbortSignal` as the **single cancellation mechanism**. Adapters do not maintain their own acquire timeouts, do not layer a `defaultTimeout`-derived timer of their own, and do not invent adapter-specific cancellation knobs. The client constructs the signal (from the caller, from `defaultTimeout`, or both composed) and the adapter honours it. This keeps cancellation unified across the library: one signal controls acquire + dispatch + first-byte ([ADR-0013](0013-cancellation-and-timeouts.md)), and `mssql:query:aborted` ([ADR-0014](0014-diagnostics.md)) publishes uniformly whether the abort landed in the pool phase or later.
+`pool.acquire(signal)` respects the inbound `AbortSignal` as the **single cancellation mechanism**. Adapters do not maintain their own acquire timeouts, do not layer a `defaultTimeout`-derived timer of their own, and do not invent adapter-specific cancellation knobs. The client constructs the signal (from the caller, from `defaultTimeout`, or both composed) and the adapter honours it. This keeps cancellation unified across the library: one signal controls acquire + dispatch + first-byte, and `mssql:query:aborted` publishes uniformly whether the abort landed in the pool phase or later.
 
-When the signal fires, the adapter propagates the abort into whatever pending work it has (tarn's internal aborter, a `fetch`-style race, whatever the library provides) and rejects the acquire. The rejection is translated to `AbortError` or `TimeoutError` — derived from `signal.reason` — at the port boundary ([ADR-0017](0017-error-taxonomy.md)).
+When the signal fires, the adapter propagates the abort into whatever pending work it has (tarn's internal aborter, a `fetch`-style race, whatever the library provides) and rejects the acquire. The rejection is translated to `AbortError` or `TimeoutError` — derived from `signal.reason` — at the port boundary.
 
 **Tarn is a grandfathered exception.** Tarn's `acquireTimeoutMillis` is not optional — the library insists on its own timeout regardless of whether a signal is also provided. The `@tediousjs/mssql-tarn` adapter handles this by:
 
@@ -101,9 +101,9 @@ Semantics:
 
 - `onAcquire` runs inside the pool's acquire path, after the adapter's own validation (e.g. a driver-level health check), before the connection is returned. If it throws, the adapter destroys the connection and retries — either pulling another cached connection or creating a fresh one, under whatever retry policy the adapter documents. From the consumer's perspective this is still a single logical acquire; retries are internal, bounded by `defaultTimeout` / signal. If the adapter ultimately cannot produce a healthy connection (create-failure — see below), it throws a `ConnectionError` and the consumer sees it immediately. Intended for validation, state normalisation, and user-specific settings.
 - `onRelease` runs inside the pool's release path, before the adapter's own internal cleanup (`Connection.reset()` and requeue-or-close). If it throws, the adapter destroys the connection rather than returning it to the idle set. Intended for application-scoped cleanup that `sp_reset_connection` does not cover.
-- Both emit `mssql:connection:reset` from the adapter with `stage: 'on-acquire' | 'on-release'` and `durationMs` (see [ADR-0014](0014-diagnostics.md)). The `stage: 'driver'` event for `Connection.reset()` itself is emitted by the driver.
+- Both emit `mssql:connection:reset` from the adapter with `stage: 'on-acquire' | 'on-release'` and `durationMs`. The `stage: 'driver'` event for `Connection.reset()` itself is emitted by the driver.
 
-Pool adapters distinguish **validate-failure** (a cached connection turned out to be dead, or `onAcquire` threw — recover silently by swapping in another cached connection or creating a fresh one) from **create-failure** (a fresh connection could not be established — surface immediately as `ConnectionError` rather than burning the caller's timeout budget in a retry loop). This is a port-level requirement on adapter authors; tarn already works this way, and [ADR-0017](0017-error-taxonomy.md) specifies the contract in full.
+Pool adapters distinguish **validate-failure** (a cached connection turned out to be dead, or `onAcquire` threw — recover silently by swapping in another cached connection or creating a fresh one) from **create-failure** (a fresh connection could not be established — surface immediately as `ConnectionError` rather than burning the caller's timeout budget in a retry loop). This is a port-level requirement on adapter authors; tarn already works this way.
 
 **`SingleConnectionPool` implements the same hook contract.** On the first `acquire()`, the pool opens its one connection and runs `onAcquire`; if either step fails, it closes and tries once more (with the same validate-vs-create split — a fresh-open failure is terminal). On `release()`, it runs `onRelease`, then `Connection.reset()`, then marks the connection idle-available for the next acquire. Because the same hook shape runs, a configuration that works under tarn continues to work under `SingleConnectionPool` without changes.
 
@@ -132,7 +132,7 @@ This addresses [tediousjs/node-mssql#1834](https://github.com/tediousjs/node-mss
 - Third-party pool packages are a supported extension point. The shape they implement is the same shape first-party `@tediousjs/mssql-tarn` implements — no internal/external asymmetry.
 - `SingleConnectionPool` serialises concurrent acquires on one underlying connection. For hot-path workloads with real concurrency, tarn's min/max is the correct choice and the meta `mssql` package still defaults to it. The one-connection-per-client shape is deliberate for the edge/serverless deployments that target it: most invocations do one or a few queries and would otherwise re-establish a connection per query.
 - Transactions, savepoints, prepared statements, and `sql.acquire()` all continue to work with a single-connection pool because they only use `acquire` / `release`. The underlying connection is the same one every time, so session-scoped state inside a `sql.acquire()` block behaves identically to any other adapter.
-- Diagnostics (`mssql:pool:acquire`, `mssql:pool:release`, etc. — see [ADR-0014: Diagnostics](0014-diagnostics.md)) emit the same events regardless of which pool adapter is in use. Users get consistent observability whether they are on tarn, custom, or single-shot.
+- Diagnostics (`mssql:pool:acquire`, `mssql:pool:release`, etc.) emit the same events regardless of which pool adapter is in use. Users get consistent observability whether they are on tarn, custom, or single-shot.
 - Drivers and pools are orthogonal. Any driver works with any pool. The core's responsibility is to keep them that way — no pool adapter should need to know which driver is in use, and vice versa.
 
 ## Alternatives considered
@@ -157,6 +157,5 @@ This addresses [tediousjs/node-mssql#1834](https://github.com/tediousjs/node-mss
 
 - [ADR-0006: Unified queryable API](0006-queryable-api.md)
 - [ADR-0010: Driver port (hexagonal architecture)](0010-driver-port.md)
-- [ADR-0014: Diagnostics](0014-diagnostics.md)
 - [tarn](https://github.com/vincit/tarn.js) — the pool that first-party `@tediousjs/mssql-tarn` adapts.
 - [tediousjs/node-mssql#1517](https://github.com/tediousjs/node-mssql/issues/1517) — acquire-a-single-connection request; the pool port makes single-shot deployments trivial alongside it.

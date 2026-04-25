@@ -33,7 +33,7 @@ const cols = await sql`select a.id, b.id from a join b on a.x = b.x`.columns()
 
 `.columns()` resolves at the first metadata signal from the driver — as soon as the column shape for the first rowset is known. The resolved value is an array of `ColumnMeta` descriptors — name, type, nullability, precision / scale, collation where applicable — one per column in the first rowset. For multi-rowset responses, `.rowsets()` yields rowset values that each carry their own `.columns()`; the top-level `Query.columns()` reflects the first rowset only.
 
-**`.columns()` kicks off execution.** If no other terminal has fired yet, calling `.columns()` starts the request: the library acquires a connection, sends the statement, and resolves `.columns()` as soon as metadata arrives. To avoid pulling megabytes of rows the caller has not asked for, the driver then **pauses the underlying socket** — tedious exposes `connection.socket.pause()` / `.resume()`, msnodesqlv8 has an equivalent — so the server-side buffer backs up until a row-consuming terminal (`.all()`, `.iterate()`, `.run()`, `.raw()`, `.rowsets()`) resumes it. If the caller never fires a consuming terminal, `.dispose()` on the Query asks the driver to cancel the paused stream (see [ADR-0008](0008-query-lifecycle-and-disposal.md)) — O(1) network bytes rather than draining megabytes the caller has already declined. This is the trade-off for letting `.columns()` run before consumption: you learn the shape eagerly, but you must either consume or dispose.
+**`.columns()` kicks off execution.** If no other terminal has fired yet, calling `.columns()` starts the request: the library acquires a connection, sends the statement, and resolves `.columns()` as soon as metadata arrives. To avoid pulling megabytes of rows the caller has not asked for, the driver then **pauses the underlying socket** — tedious exposes `connection.socket.pause()` / `.resume()`, msnodesqlv8 has an equivalent — so the server-side buffer backs up until a row-consuming terminal (`.all()`, `.iterate()`, `.run()`, `.raw()`, `.rowsets()`) resumes it. If the caller never fires a consuming terminal, `.dispose()` on the Query asks the driver to cancel the paused stream — O(1) network bytes rather than draining megabytes the caller has already declined. This is the trade-off for letting `.columns()` run before consumption: you learn the shape eagerly, but you must either consume or dispose.
 
 Running terminals concurrently on the same Query is supported — the common pattern is `const [rows, meta] = await Promise.all([q.all(), q.meta()])` — because all terminals drive the same underlying stream. What still throws is *re-consuming* the same Query: once a consuming terminal has fired and the stream has drained (or errored), a second `.all()` / `.iterate()` / `.raw()` on the same Query throws. `.columns()` and `.meta()` may be called repeatedly and return the same resolved value.
 
@@ -60,7 +60,7 @@ interface QueryMeta<O = Record<string, never>> {
   cancellation?: {
     reason:
       | 'user-abort'              // AbortSignal passed via .signal()
-      | 'response-start-timeout'  // the single defaultTimeout fired before first byte — ADR-0013
+      | 'response-start-timeout'  // the single defaultTimeout fired before first byte
       | 'early-terminate'         // library-initiated — for-await break / return / throw, or dispose at scope exit
       | 'error'                   // server or driver error mid-stream
     error?: Error
@@ -74,7 +74,7 @@ Semantics:
 - `q.meta()` called **before any terminal has fired** throws `TypeError` synchronously. A `Query` that has not been awaited or iterated has no stream to drain, so there is no meta to eventually resolve to — awaiting would hang forever. The synchronous throw surfaces the mistake at the call site. (Contrast with calling mid-stream: there, the stream *is* running, so meta just awaits its completion like any other consumer.)
 - On cancellation (`AbortSignal`, iterator `return()`, early rejection), `meta()` still resolves — with whatever tokens arrived before cancel, `completed: false`, and `cancellation` populated. This is useful for debugging ("what info messages did I get before the abort?").
 - Inline `await sql\`...\`` users who discard the `Query` reference lose access to meta. That is the expected trade-off for the one-liner ergonomics; holding the reference is one extra line.
-- Typing flows from the query source: the procedure builder ([ADR-0009](0009-stored-procedures-and-prepared-statements.md)) parameterises `O` from its `.output()` / `.inout()` declarations, so `(await q.meta()).output.x` is typed without the user having to restate it at the call site.
+- Typing flows from the query source: the procedure builder parameterises `O` from its `.output()` / `.inout()` declarations, so `(await q.meta()).output.x` is typed without the user having to restate it at the call site.
 
 ### Duplicate column names — last-wins, with `.raw()` as the escape hatch
 
@@ -103,14 +103,14 @@ SQL Server sends three kinds of side-channel messages during a request:
 
 - **info** — severity ≤ 10 non-print messages (truncation warnings, deprecation notices, `sys.messages` informational entries).
 - **print** — T-SQL `PRINT` output and `RAISERROR` with severity 0. Often used for procedural debug.
-- **envChange** — session-level state changes the driver reports (database, language, collation, packet size, isolation level). The pool does not react to these; consumers who need state consistency when a connection is returned to the pool configure a client-level `onRelease` hook (see [ADR-0011](0011-pool-port.md)), not automatic invalidation.
+- **envChange** — session-level state changes the driver reports (database, language, collation, packet size, isolation level). The pool does not react to these; consumers who need state consistency when a connection is returned to the pool configure a client-level `onRelease` hook, not automatic invalidation.
 
 These three are kept separate because they have different meanings and different consumer needs; mssql v12 collapses the first two into a single `info` event which is a downgrade we do not want to carry forward.
 
 Two paths cover two different consumer shapes in v13.0:
 
 1. **Per-query, post-drain via `q.meta()`** — `info`, `print`, `envChanges` arrays on the trailer object, populated by the time the stream drains. This is the path users reach for when they want to see what messages came back from *this* query. First-class.
-2. **Cross-cutting via `diagnostics_channel`** — `mssql:request:info`, `mssql:request:print`, `mssql:request:env-change` publish globally for every request, regardless of listener registration, for APM integration and for structured logging across all queries. The right tool for "log every PRINT my service ever emits" or "feed every info message into the tracing span." See [ADR-0014](0014-diagnostics.md).
+2. **Cross-cutting via `diagnostics_channel`** — `mssql:request:info`, `mssql:request:print`, `mssql:request:env-change` publish globally for every request, regardless of listener registration, for APM integration and for structured logging across all queries. The right tool for "log every PRINT my service ever emits" or "feed every info message into the tracing span."
 
 ```ts
 // Per-query: collected from meta() after drain.
@@ -119,7 +119,7 @@ const [rows, meta] = await Promise.all([q.all(), q.meta()])
 meta.print.forEach(msg => log(msg))
 ```
 
-**Live, per-query mid-stream message access is not first-class in v13.0.** There is no public Query identifier or supported correlation pattern that would let a `diagnostics_channel` subscriber filter to a specific query — using `diagnostics_channel` that way is an anti-pattern. The narrow band where this matters (live PRINT progress on a long migration, interactive debug-proc output) is deferred until real demand emerges and the listener-lifecycle interaction with re-executable templates ([ADR-0009](0009-stored-procedures-and-prepared-statements.md)) is designed. See Alternatives Considered.
+**Live, per-query mid-stream message access is not first-class in v13.0.** There is no public Query identifier or supported correlation pattern that would let a `diagnostics_channel` subscriber filter to a specific query — using `diagnostics_channel` that way is an anti-pattern. The narrow band where this matters (live PRINT progress on a long migration, interactive debug-proc output) is deferred until real demand emerges and the listener-lifecycle interaction with re-executable templates is designed. See Alternatives Considered.
 
 **Promote-to-error policy** at the client level, predicate form so the threshold is user-chosen:
 
@@ -129,7 +129,7 @@ createClient({
 })
 ```
 
-When the predicate returns `true`, core throws a `QueryError` ([ADR-0017](0017-error-taxonomy.md)) at the point in the stream where the info would have been emitted. Rails' `strict_loading` and SQLAlchemy's `filterwarnings('error', SAWarning)` establish this as a familiar pattern; doing it at library level is a genuine win because T-SQL's severity/number system gives us a natural threshold that generic warning-promotion frameworks do not.
+When the predicate returns `true`, core throws a `QueryError` at the point in the stream where the info would have been emitted. Rails' `strict_loading` and SQLAlchemy's `filterwarnings('error', SAWarning)` establish this as a familiar pattern; doing it at library level is a genuine win because T-SQL's severity/number system gives us a natural threshold that generic warning-promotion frameworks do not.
 
 ## Consequences
 
@@ -141,7 +141,7 @@ When the predicate returns `true`, core throws a `QueryError` ([ADR-0017](0017-e
 
 ## Alternatives considered
 
-**Per-`Query` `EventEmitter` for live `info` / `print` / `envChange` events.** Considered for the inline ergonomics — `q.on('print', cb)` reads naturally next to `for await (const row of q)`, and Node's `EventEmitter` is the standard observer surface. Deferred to a later v13 minor. The listener-lifecycle story does not survive contact with re-executable templates ([ADR-0009](0009-stored-procedures-and-prepared-statements.md)): `Procedure` and `PreparedStatement` extend `Query<T>` but a "terminal" on them ends a single round-trip, not the object's life — clearing listeners on terminal forces re-registration after every execute, persisting them violates the leak-prevention story raw queries need, and giving the subtypes different listener semantics from the parent makes the inheritance lie. v13.0 ships `q.meta()` as the per-query path (post-drain) and `diagnostics_channel` as the cross-cutting global path; the *live, per-query* band is genuinely narrow and not yet validated by demand. We do not steer users toward `diagnostics_channel` for per-query filtering — that would require a public Query identifier and a correlation pattern we have not designed, and using a global telemetry channel for per-instance observation is the wrong tool for the job. The chained `.onInfo(cb)` / `.onPrint(cb)` shape is deferred for the same reason — it is an alternative spelling of the same surface.
+**Per-`Query` `EventEmitter` for live `info` / `print` / `envChange` events.** Considered for the inline ergonomics — `q.on('print', cb)` reads naturally next to `for await (const row of q)`, and Node's `EventEmitter` is the standard observer surface. Deferred to a later v13 minor. The listener-lifecycle story does not survive contact with re-executable templates: `Procedure` and `PreparedStatement` extend `Query<T>` but a "terminal" on them ends a single round-trip, not the object's life — clearing listeners on terminal forces re-registration after every execute, persisting them violates the leak-prevention story raw queries need, and giving the subtypes different listener semantics from the parent makes the inheritance lie. v13.0 ships `q.meta()` as the per-query path (post-drain) and `diagnostics_channel` as the cross-cutting global path; the *live, per-query* band is genuinely narrow and not yet validated by demand. We do not steer users toward `diagnostics_channel` for per-query filtering — that would require a public Query identifier and a correlation pattern we have not designed, and using a global telemetry channel for per-instance observation is the wrong tool for the job. The chained `.onInfo(cb)` / `.onPrint(cb)` shape is deferred for the same reason — it is an alternative spelling of the same surface.
 
 **Put trailer data in each terminal's return shape (no universal `.meta()`).** An earlier draft had `.run()` return `{ rowsAffected, info, print, envChanges }` with `.all()` / `.iterate()` having no meta access at all. Rejected — trailer data is delivered alongside every response (the server sends row counts, info / print / envchange messages, and procedure output parameters as part of completing the request), so gating it behind specific terminals is hiding information the server already paid to send. `q.meta()` as a universal accessor means every consumption path can reach `rowsAffected` without switching terminals. The specific terminals that *do* include meta in their return shape (`.run()`) are retained as convenience shortcuts, not as the sole access path.
 
@@ -150,9 +150,4 @@ When the predicate returns `true`, core throws a `QueryError` ([ADR-0017](0017-e
 ## References
 
 - [ADR-0006: Unified queryable API](0006-queryable-api.md) — parent decision; terminal set this ADR builds on.
-- [ADR-0008: Query lifecycle and disposal](0008-query-lifecycle-and-disposal.md) — `.dispose()` semantics on a `.columns()`-paused stream.
-- [ADR-0009: Stored procedures and prepared statements](0009-stored-procedures-and-prepared-statements.md) — typed `O` flows from procedure output declarations into `q.meta().output`.
-- [ADR-0011: Pool port](0011-pool-port.md) — `onRelease` hook for envChange-driven state reset.
-- [ADR-0014: Diagnostics](0014-diagnostics.md) — cross-cutting `mssql:request:info` / `:print` / `:env-change` channels.
-- [ADR-0017: Error taxonomy](0017-error-taxonomy.md) — `QueryError` thrown by `errorOnInfo`.
 - [tediousjs/node-mssql#1384](https://github.com/tediousjs/node-mssql/issues/1384) — duplicate column names; v13 switches to last-wins, `.raw()` is the escape hatch.

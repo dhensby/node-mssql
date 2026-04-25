@@ -43,7 +43,7 @@ interface EncryptOptions {
 
 `EncryptOptions` is intentionally minimal: `strict` is the one knob both tedious and msnodesqlv8 expose uniformly (TDS 8.0 mode / `Encrypt=strict`). Richer TLS configuration (cipher suites, min/max TLS version, custom CA roots, SNI overrides) lives in `Transport.native` today rather than being lifted into the portable surface. The threshold for promoting a knob onto `EncryptOptions` is "both drivers support it and users reach for it routinely" — neither condition is currently met for the rest. Additive fields remain backwards-compatible.
 
-Timeouts deliberately do not live on `Transport`. The single client-level `defaultTimeout` from [ADR-0013](0013-cancellation-and-timeouts.md) covers pool acquire, TDS login, and first-byte wait as one combined budget; per-call deadlines use `.signal(AbortSignal.timeout(…))`. Having driver-specific transport timeouts alongside would reintroduce exactly the two-mental-models problem ADR-0013 was written to avoid. Driver-internal handshake knobs that are genuinely unique to a driver (tedious's `options.connectTimeout` for a background maintenance connection, etc.) go through `transport.native`.
+Timeouts deliberately do not live on `Transport`. A single client-level `defaultTimeout` covers pool acquire, TDS login, and first-byte wait as one combined budget; per-call deadlines use `.signal(AbortSignal.timeout(…))`. Having driver-specific transport timeouts alongside would reintroduce exactly the two-mental-models problem the unified timeout was written to avoid. Driver-internal handshake knobs that are genuinely unique to a driver (tedious's `options.connectTimeout` for a background maintenance connection, etc.) go through `transport.native`.
 
 Drivers translate these to their native shapes inside `open()` ([ADR-0010](0010-driver-port.md)):
 
@@ -73,7 +73,7 @@ Drivers call `provider()` on each connection open and on token refresh (timing i
 ## Consequences
 
 - Users write portable config. Switching `driver: tedious()` to `driver: msnodesqlv8()` rarely requires any change beyond that line.
-- Connection strings ([ADR-0015](0015-connection-strings.md)) parse into these types, not into driver-native shapes. The string dialect is unified at the type level regardless of driver.
+- Connection strings parse into these types, not into driver-native shapes. The string dialect is unified at the type level regardless of driver.
 - `@azure/identity` is a peer concern — core never imports it, never depends on it, never pins a version. Users pick their own token source.
 - Capability mismatches are explicit runtime errors, not silent fallbacks. This is better than v12's current behaviour of accepting configs that then fail in subtle ways later.
 - A new driver landing `integrated` support means adding acceptance in that driver's `open()` — no type changes, no API changes, no coordination with core.
@@ -91,6 +91,4 @@ Drivers call `provider()` on each connection open and on token refresh (timing i
 ## References
 
 - [ADR-0010: Driver port](0010-driver-port.md) — the consumer of these types.
-- [ADR-0013: Cancellation and timeouts](0013-cancellation-and-timeouts.md) — defines the single client-level `defaultTimeout` that replaces per-transport timeout knobs.
-- [ADR-0015: Connection string parsing](0015-connection-strings.md) — the string form that deserialises to these types.
 - [@azure/identity](https://www.npmjs.com/package/@azure/identity) — the canonical token provider wiring target.

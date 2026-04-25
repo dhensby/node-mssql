@@ -35,7 +35,7 @@ Later additions (TVP, bulk, sqlcmd, testing mocks) will each be a new `packages/
 Rules:
 
 - **npm workspaces** (not pnpm, Yarn, Turborepo, Nx, Lerna). Prefer native Node and npm tooling over third-party tooling when the native option meets our needs; no `packageManager` field required; contributors do not need to install any additional CLI.
-- **Drivers declare `@tediousjs/mssql-core` as a peer dependency**, not a regular dependency. This guarantees a single shared copy of core at install time, so `instanceof` checks on error classes work across the library boundary. See [ADR-0017](0017-error-taxonomy.md).
+- **Drivers declare `@tediousjs/mssql-core` as a peer dependency**, not a regular dependency. This guarantees a single shared copy of core at install time, so `instanceof` checks on error classes work across the library boundary.
 - **Private test-harness package**, never published. Shared infrastructure that all packages use for integration tests.
 
 ## Consequences
@@ -58,8 +58,6 @@ Rules:
 
 ## References
 
-- [node-redis packages directory](https://github.com/redis/node-redis/tree/master/packages) — reference for layout patterns. Note: node-redis ships in lockstep; we deliberately diverge — see [ADR-0005](0005-release-and-ci.md).
+- [node-redis packages directory](https://github.com/redis/node-redis/tree/master/packages) — reference for layout patterns.
 - [npm workspaces docs](https://docs.npmjs.com/cli/using-npm/workspaces)
 - [ADR-0001: Scope and goals of the v13 rewrite](0001-scope-and-goals.md)
-- [ADR-0005: Release process, CI workflows, and dependency automation](0005-release-and-ci.md)
-- [ADR-0017: Error taxonomy](0017-error-taxonomy.md)

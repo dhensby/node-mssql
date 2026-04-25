@@ -23,12 +23,12 @@ The v13 unified `Queryable` ([ADR-0006](0006-queryable-api.md)) already defines 
 interface Driver {
   readonly name: string
   open(opts: DriverOptions): Promise<Connection>
-  readonly connectionStringSchema?: ConnectionStringSchema  // see ADR-0015
+  readonly connectionStringSchema?: ConnectionStringSchema  // driver's connection-string parser
   readonly types: TypeRegistry                              // driver's type coercions
 }
 
 interface Connection {
-  readonly id: string                                       // object ID from ADR-0016
+  readonly id: string                                       // library-assigned correlation id
   execute(req: ExecuteRequest, signal?: AbortSignal): AsyncIterable<ResultEvent>
   beginTransaction(opts?: TxOptions): Promise<void>
   commit(): Promise<void>
@@ -66,7 +66,7 @@ type ResultEvent =
   | { kind: 'done' }
 ```
 
-The kernel consumes this stream to build whatever shape the terminal requires: it threads info/print/envChange into the `QueryMeta` accumulator (available via `q.meta()` after drain — [ADR-0007](0007-query-result-presentation.md)), and publishes them on `diagnostics_channel` ([ADR-0014](0014-diagnostics.md)). v13.0 deliberately does not ship a per-`Query` `EventEmitter` for these — the listener-lifecycle interaction with re-executable templates does not survive contact with `Procedure` / `PreparedStatement` ([ADR-0009](0009-stored-procedures-and-prepared-statements.md)); see ADR-0007 Alternatives. This is the part of v12's EventEmitter model that caused the most pain — row events conflated with lifecycle, `request.on('row', ...)` leaking request state into application code, `Promise.all` sometimes failing because of it. `AsyncIterable<ResultEvent>` out of `execute()` replaces it at the driver-port layer; the EventEmitter that surfaces on `Query<T>` is an observability surface at the *kernel* layer, never the driver layer, and it carries only the three side-channel kinds — not row data.
+The kernel consumes this stream to build whatever shape the terminal requires: it threads info/print/envChange into the `QueryMeta` accumulator (available via `q.meta()` after drain — [ADR-0007](0007-query-result-presentation.md)), and publishes them on `diagnostics_channel`. v13.0 deliberately does not ship a per-`Query` `EventEmitter` for these — the listener-lifecycle interaction with re-executable templates does not survive contact with `Procedure` / `PreparedStatement`; see ADR-0007 Alternatives. This is the part of v12's EventEmitter model that caused the most pain — row events conflated with lifecycle, `request.on('row', ...)` leaking request state into application code, `Promise.all` sometimes failing because of it. `AsyncIterable<ResultEvent>` out of `execute()` replaces it at the driver-port layer; the EventEmitter that surfaces on `Query<T>` is an observability surface at the *kernel* layer, never the driver layer, and it carries only the three side-channel kinds — not row data.
 
 The event list is deliberately tight — one entry:
 
@@ -76,22 +76,22 @@ Everything else — per-request info/print/envChange, connection-scoped failures
 
 ### Port surface is sized to the real drivers
 
-The mandatory surface above is the superset of what `tedious` and `msnodesqlv8` already do: both support execute, transactions, savepoints, prepare, bulk, reset, and TVP (TVP flows through `execute` as a parameter value; its wire-format encoding is a driver implementation detail). `ping()` is new in v13 — drivers implement it as the cheapest round-trip their protocol allows (a no-op TDS batch for tedious, an ODBC attribute check for msnodesqlv8, a protocol-level keepalive where supported). It exists to give the kernel's `onAcquire` lifecycle hook ([ADR-0011](0011-pool-port.md)) a primitive to check connection liveness with — addressing [tediousjs/node-mssql#1834](https://github.com/tediousjs/node-mssql/issues/1834). Designing the port around the drivers that actually exist is a deliberate scoping choice — the alternative is speculating about a hypothetical third driver that can only do some subset, and carrying the cost of that abstraction (capability interfaces, runtime feature sets, per-feature type guards) before any real driver needs it.
+The mandatory surface above is the superset of what `tedious` and `msnodesqlv8` already do: both support execute, transactions, savepoints, prepare, bulk, reset, and TVP (TVP flows through `execute` as a parameter value; its wire-format encoding is a driver implementation detail). `ping()` is new in v13 — drivers implement it as the cheapest round-trip their protocol allows (a no-op TDS batch for tedious, an ODBC attribute check for msnodesqlv8, a protocol-level keepalive where supported). It exists to give the kernel's `onAcquire` lifecycle hook a primitive to check connection liveness with — addressing [tediousjs/node-mssql#1834](https://github.com/tediousjs/node-mssql/issues/1834). Designing the port around the drivers that actually exist is a deliberate scoping choice — the alternative is speculating about a hypothetical third driver that can only do some subset, and carrying the cost of that abstraction (capability interfaces, runtime feature sets, per-feature type guards) before any real driver needs it.
 
 If and when a driver lands that genuinely cannot honour part of this surface (e.g. a read-replica-only driver that has no business implementing `bulkLoad`, or a mock driver that wants to leave `prepare` unimplemented), we add capability interfaces at that point — promoting the relevant methods into `Preparable` / `BulkCapable` / etc. and narrowing `Connection` to the bedrock. That is additive and non-breaking for drivers that already implement everything: their `Connection` just becomes `Connection & Preparable & BulkCapable & ...`. The deferral is cheap because the refactor does not require changing how drivers are written; it requires moving type declarations.
 
 Drivers are responsible for:
 
 - Wire protocol (TDS, ODBC, etc.)
-- Native auth translation from the core `Credential` shape ([ADR-0012](0012-credential-and-transport.md)) to driver-native packets.
-- Native error mapping to the core `Errors` taxonomy ([ADR-0017: Error taxonomy](0017-error-taxonomy.md)). Drivers throw `MssqlError`-family errors, not driver-native errors.
+- Native auth translation from the core `Credential` shape to driver-native packets.
+- Native error mapping to the core `Errors` taxonomy. Drivers throw `MssqlError`-family errors, not driver-native errors.
 - Type registry entries for their protocol — SQL2025 JSON/Vector land as `types.Json`/`types.Vector` in whichever driver supports them first.
 
 Drivers are **not** responsible for:
 
-- Pooling — that is the pool port ([ADR-0011](0011-pool-port.md)).
+- Pooling — that is the pool port.
 - Retry, backoff, or failover.
-- Cancellation composition — drivers implement `cancel` on a single request; `AbortSignal.any` composition happens in the kernel ([ADR-0013](0013-cancellation-and-timeouts.md)).
+- Cancellation composition — drivers implement `cancel` on a single request; `AbortSignal.any` composition happens in the kernel.
 - Diagnostics channel naming — the kernel publishes; drivers feed context in.
 - `AsyncDisposable`. The driver `Connection` is not itself `AsyncDisposable`. The *library handle* that wraps it (pooled connection, transaction, savepoint) is. Keeping the driver simple means third parties can implement drivers without having to think about disposable semantics.
 
@@ -111,7 +111,7 @@ Drivers are **not** responsible for:
 
 ## Alternatives considered
 
-**Single `SqlClient` interface covering driver + pool.** Rejected — blurs responsibilities. See [ADR-0011](0011-pool-port.md) for the separation.
+**Single `SqlClient` interface covering driver + pool.** Rejected — blurs responsibilities; the pool concerns belong on a separate port.
 
 **Use `node:stream` `Readable` for row data.** Rejected in favour of `AsyncIterable`. Streams are powerful but overkill for row events, they do not type as cleanly, and the `for await` ergonomics of `AsyncIterable` are what the `Queryable` API is built on.
 
@@ -119,7 +119,7 @@ Drivers are **not** responsible for:
 
 **Narrow `.on()` surface with only `on`/`off`, no `once`/`removeAllListeners`.** Considered. Rejected because the value of `once` (one-shot listeners are common for `close` handlers) and `removeAllListeners` (cleanup paths during teardown) outweighs the marginal cognitive saving of a smaller surface. The decision worth making is *what events exist*, and we made it — keeping the full `EventEmitter` method set for those events costs nothing.
 
-**Expose a connection-scoped `'error'` event.** Rejected — node `EventEmitter`'s no-listener-crash semantics for `'error'` are actively hostile for pooled, long-lived connections that spend most of their lives idle and un-listened-to. We considered overriding `emit('error', ...)` to publish-to-diagnostics-and-return-false, but that is a quiet departure from documented `EventEmitter` semantics that users may rely on for loud-failure signalling. The cleaner answer is not to have the event at all: fatal connection errors surface as a `close` event with `reason: 'error'` and a populated `error` payload, which carries all the same information without the no-listener hazard. Transient or informational driver-internal errors go through `diagnostics_channel` ([ADR-0014](0014-diagnostics.md)).
+**Expose a connection-scoped `'error'` event.** Rejected — node `EventEmitter`'s no-listener-crash semantics for `'error'` are actively hostile for pooled, long-lived connections that spend most of their lives idle and un-listened-to. We considered overriding `emit('error', ...)` to publish-to-diagnostics-and-return-false, but that is a quiet departure from documented `EventEmitter` semantics that users may rely on for loud-failure signalling. The cleaner answer is not to have the event at all: fatal connection errors surface as a `close` event with `reason: 'error'` and a populated `error` payload, which carries all the same information without the no-listener hazard. Transient or informational driver-internal errors go through `diagnostics_channel`.
 
 **Separate connection-scoped `'info'` event alongside per-request info in `ResultEvent`.** Considered, rejected. Early drafts split info into two surfaces — connection-scoped for things like login banner messages, request-scoped for `PRINT` output and severity-≤10 messages during execute. In practice every info message TDS delivers is tied to a request (login is a request), so the split was theoretical. Collapsed into `ResultEvent` kinds, with `diagnostics_channel` as the observability mirror.
 
@@ -135,9 +135,5 @@ Drivers are **not** responsible for:
 
 - [ADR-0004: Monorepo layout](0004-monorepo-layout.md) — peer-dep discipline that keeps `instanceof` identity intact.
 - [ADR-0006: Unified queryable API](0006-queryable-api.md) — defines what the kernel needs from a driver.
-- [ADR-0011: Pool port](0011-pool-port.md) — the sibling port.
-- [ADR-0012: Credential and Transport abstractions](0012-credential-and-transport.md)
-- [ADR-0013: Cancellation and timeouts](0013-cancellation-and-timeouts.md)
-- [ADR-0017: Error taxonomy](0017-error-taxonomy.md)
 - [tedious](https://github.com/tediousjs/tedious) — first-party driver adapter target.
 - [msnodesqlv8](https://github.com/TimelordUK/node-sqlserver-v8) — second driver adapter target.

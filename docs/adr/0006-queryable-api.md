@@ -20,11 +20,7 @@ Modern libraries have converged on a better shape:
 
 ## Decision
 
-This ADR records the **top-level decision**: one queryable shape, the dual-protocol `Query`, the terminal set, and the scope-factory rules. Three sibling ADRs cover the parts that are large enough to merit their own discussion:
-
-- **[ADR-0007](0007-query-result-presentation.md): Query result presentation** — `.raw()` / `.columns()`, trailer data via `q.meta()`, duplicate-column handling, and the info / print / envChange side channels.
-- **[ADR-0008](0008-query-lifecycle-and-disposal.md): Query lifecycle and disposal** — laziness, exit paths, `.dispose()` semantics, the helper-pattern footgun, and the uniform `AsyncDisposable` table.
-- **[ADR-0009](0009-stored-procedures-and-prepared-statements.md): Stored procedures and prepared statements** — re-executable templates, the builder surface, and the prepared-statement handle lifecycle.
+This ADR records the **top-level decision**: one queryable shape, the dual-protocol `Query`, the terminal set, and the scope-factory rules. Result presentation (`.raw()`, `.columns()`, trailer data, side channels), query lifecycle and disposal semantics, and re-executable templates (stored procedures, prepared statements) are large enough to merit their own discussion and are out of scope here.
 
 ### One shape across every scope
 
@@ -46,8 +42,8 @@ for await (const user of sql`select * from users`) { ... }
 | `.all<T>()` | `T[]` | — | Explicit alias for the default `await` behaviour |
 | `.iterate<T>()` | — | `T` | Explicit alias for the default `for await` behaviour |
 | `.run()` | `QueryMeta<O>` | — | Drains the response *without buffering rows* — memory-efficient for DML or procs whose rowsets you do not need |
-| `.raw<R>()` | `R[]` | `R` | Toggle view: rows arrive as `unknown[]` tuples instead of objects. Preserves duplicate columns, matches `.columns()` order; otherwise identical to the Query it was called on. See [ADR-0007](0007-query-result-presentation.md) |
-| `.columns()` | `ColumnMeta[]` | — | Column metadata for the first rowset. Resolves at the first metadata token; see [ADR-0007](0007-query-result-presentation.md) |
+| `.raw<R>()` | `R[]` | `R` | Toggle view: rows arrive as `unknown[]` tuples instead of objects. Preserves duplicate columns, matches `.columns()` order; otherwise identical to the Query it was called on |
+| `.columns()` | `ColumnMeta[]` | — | Column metadata for the first rowset. Resolves at the first metadata token |
 | `.rowsets<Tuple>()` | `Tuple` | `AsyncIterable<Tuple[number]>` | Multi-rowset: buffered tuple when awaited, nested stream when iterated. Each inner rowset carries its own `.columns()` |
 
 ### Single-rowset terminals throw on multi-rowset
@@ -62,7 +58,7 @@ for await (const user of sql`select * from users`) { ... }
 
 Each `Query<T>` object is single-consumption for row-consuming terminals: once `.all()`, `.iterate()`, `.raw()`, or the default `await` / `for await` has drained the stream (or errored), a second consuming terminal on the same object throws — `await q.all()` followed by `await q.iterate()` throws on the second call. To run the same SQL again, call the tag again — each call produces a new `Query<T>` and a new server round-trip. To run it once and share the materialised rows, `await` it and share the resulting `T[]`. `.columns()` and `.meta()` may be called repeatedly and resolved concurrently with a consuming terminal (e.g. `const [rows, meta] = await Promise.all([q.all(), q.meta()])`) — they observe the same underlying stream without competing for it.
 
-Stored procedures and prepared statements ([ADR-0009](0009-stored-procedures-and-prepared-statements.md)) are the deliberate exception to single-consumption: they are *templates*, and each `.bind().terminal()` call produces a fresh internal Query for a fresh round-trip.
+Stored procedures and prepared statements are the deliberate exception to single-consumption: they are *templates*, and each `.bind().terminal()` call produces a fresh internal Query for a fresh round-trip.
 
 ### Multi-rowset, buffered or streamed
 
@@ -88,7 +84,7 @@ for await (const rowset of sql`
 }
 ```
 
-The streamed shape is `AsyncIterable<AsyncIterable<T>>`. The tuple type parameter narrows each inner iterable — TypeScript sees `User` in the first, `Order` in the second. Row order *within* a rowset is as the server emits it; rowset order is source-SQL order. Breaking out of either loop cancels the request ([ADR-0013](0013-cancellation-and-timeouts.md)).
+The streamed shape is `AsyncIterable<AsyncIterable<T>>`. The tuple type parameter narrows each inner iterable — TypeScript sees `User` in the first, `Order` in the second. Row order *within* a rowset is as the server emits it; rowset order is source-SQL order. Breaking out of either loop cancels the request.
 
 This shape has no direct prior art in the SQL-client landscape — Go's `database/sql` uses a pull cursor (`rows.NextResultSet()`), Oracle's node-oracledb uses implicit-result arrays of per-rowset streams, and mssql v12 uses flat `'recordset'`/`'row'` events. Nested async iterables compose better with TypeScript tuple typing and with `for await`, and they avoid the "which rowset is this row from?" state machine that flat events force on consumers.
 
@@ -103,7 +99,7 @@ sql.transaction(fn | (): tx)  // higher-order or handle form; same callable shap
 tx.savepoint(fn | (): sp)     // same callable shape
 ```
 
-Each layer **extends** the callable rather than replacing it. `sql.acquire()` returns a `ReservedConn` that *is* the callable tag plus an `AsyncDisposable`. `sql.transaction()` returns a `tx` that *is* the callable tag plus `.savepoint()`, `.commit()`, `.rollback()` (when using the handle form; the scoped-callback form manages those for the user). A savepoint likewise adds `.savepoint()` / release / rollback-to on top of the same callable. The same stance applies to procedures and prepared statements ([ADR-0009](0009-stored-procedures-and-prepared-statements.md)) — they extend `Query<T>` rather than introducing a parallel hierarchy. Users learn one shape and see it extended at each layer, not replaced.
+Each layer **extends** the callable rather than replacing it. `sql.acquire()` returns a `ReservedConn` that *is* the callable tag plus an `AsyncDisposable`. `sql.transaction()` returns a `tx` that *is* the callable tag plus `.savepoint()`, `.commit()`, `.rollback()` (when using the handle form; the scoped-callback form manages those for the user). A savepoint likewise adds `.savepoint()` / release / rollback-to on top of the same callable. The same stance applies to procedures and prepared statements — they extend `Query<T>` rather than introducing a parallel hierarchy. Users learn one shape and see it extended at each layer, not replaced.
 
 ### Session-scoped state (temp tables, settings)
 
@@ -123,17 +119,17 @@ const rows = await conn`select * from #items`
 
 What breaks (deliberately, to match pool semantics): using a raw `sql` tag (pool-bound) for the *first* statement and then another raw `sql` tag for the *second* is not guaranteed to land on the same connection. The temp table from statement one may not exist for statement two. There is no library-level magic to make this work; the user pins the connection with `acquire` / `transaction`, or they accept that each tag call can land anywhere. This is the same trade-off every pooled DB client makes; the escape hatch (`sql.acquire()`) is small and explicit.
 
-The connection's default reset-on-release (`Connection.reset()` → `sp_reset_connection`, called by the pool adapter inside its release path — [ADR-0011](0011-pool-port.md)) clears session-scoped temp tables automatically, so leaked `#items` tables do not accumulate across acquirers.
+The connection's default reset-on-release (`Connection.reset()` → `sp_reset_connection`, called by the pool adapter inside its release path) clears session-scoped temp tables automatically, so leaked `#items` tables do not accumulate across acquirers.
 
 ## Consequences
 
-- Learning the API is learning one callable, a handful of terminals, and `.meta()` for trailer data ([ADR-0007](0007-query-result-presentation.md)). Every scope works the same way.
+- Learning the API is learning one callable, a handful of terminals, and `.meta()` for trailer data. Every scope works the same way.
 - `Promise.all` always works. `EREQINPROG` is never surfaced; scopes that own a single underlying connection queue callers internally.
 - Consumers no longer carry context about "what kind of thing is this" — a function taking `sql: Queryable` can be called with the pool, a reserved connection, a transaction, or a savepoint with identical behaviour.
 - Result shapes are chosen at the call site by the terminal, not inferred from the SQL text. The long-standing "is my result in `.recordset` or `.output`?" confusion (issue #1562) goes away.
 - The tagged-template form makes it impossible to forget parameterisation at the type level. `sql\`select * from t where id = ${id}\`` always binds `id` as a parameter, never interpolates.
 - Raw string SQL (from query builders) is still supported via an explicit escape hatch, `sql.unsafe(text, params)`. The name signals intent.
-- Each scope-factory extension (`sql.acquire()`, `sql.transaction()`, `sql.savepoint()`, and the procedure / prepared-statement templates from [ADR-0009](0009-stored-procedures-and-prepared-statements.md)) adds its scope-specific methods on top of the same callable tag shape — users learn one shape and see it extended at each layer, not replaced.
+- Each scope-factory extension (`sql.acquire()`, `sql.transaction()`, `sql.savepoint()`, and the procedure / prepared-statement templates) adds its scope-specific methods on top of the same callable tag shape — users learn one shape and see it extended at each layer, not replaced.
 - Session-scoped state (temp tables, `SET` settings) works the way it does in every pooled SQL client: safe inside `sql.acquire()` / `sql.transaction()` / `sql.savepoint()`, not safe across bare pool-bound `sql` calls. The library does not try to hide this, and the default `sp_reset_connection` on release cleans up.
 
 ## Alternatives considered
@@ -155,7 +151,3 @@ The connection's default reset-on-release (`Connection.reset()` → `sp_reset_co
 - [tediousjs/node-mssql#1562](https://github.com/tediousjs/node-mssql/issues/1562) — the output-in-recordset bug.
 - [tediousjs/node-mssql#1568](https://github.com/tediousjs/node-mssql/issues/1568) — misuse of template literals.
 - [ADR-0001: Scope and goals of the v13 rewrite](0001-scope-and-goals.md)
-- [ADR-0007: Query result presentation](0007-query-result-presentation.md) — sibling: result presentation, trailer data, side channels.
-- [ADR-0008: Query lifecycle and disposal](0008-query-lifecycle-and-disposal.md) — sibling: laziness, exit paths, `.dispose()` semantics.
-- [ADR-0009: Stored procedures and prepared statements](0009-stored-procedures-and-prepared-statements.md) — sibling: re-executable templates.
-- [ADR-0010: Driver port (hexagonal architecture)](0010-driver-port.md)

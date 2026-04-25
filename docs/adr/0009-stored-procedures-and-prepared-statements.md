@@ -91,7 +91,7 @@ Semantics:
 
 - **First `.bind().terminal()` triggers `sp_prepare`.** The prepared statement is lazy in the same way `Query` is ([ADR-0008](0008-query-lifecycle-and-disposal.md)) — `sql.prepare(text).input(...)` builds the template without touching the server. The server handle is created on the first execution, at which point a connection is acquired and pinned for the rest of the `PreparedStatement`'s lifetime.
 - **Subsequent executions use `sp_execute`.** The cached handle stays alive for the whole scope; further `.bind().terminal()` calls reuse it on the pinned connection.
-- **`.dispose()` runs `sp_unprepare` and releases the pinned connection.** Uniform with `ReservedConn` disposal ([ADR-0008](0008-query-lifecycle-and-disposal.md)) — the connection goes back to the pool ([ADR-0011](0011-pool-port.md)), the server handle is freed, and any further `.bind()` on the disposed statement throws.
+- **`.dispose()` runs `sp_unprepare` and releases the pinned connection.** Uniform with `ReservedConn` disposal ([ADR-0008](0008-query-lifecycle-and-disposal.md)) — the connection goes back to the pool, the server handle is freed, and any further `.bind()` on the disposed statement throws.
 - **Never-bound statements are a no-op at disposal.** If no terminal ever fired, no connection was pinned and no handle was created; `.dispose()` has nothing to do.
 
 `PreparedStatement` extends `Query<T>` symmetrically with `Procedure`. If no `.input()` slots have been declared, the statement is directly awaitable — `await sql.prepare('select 1')` works the same way `await sql.procedure('sp_list_users')` does. If inputs have been declared, the type system requires `.bind({...args})` before any terminal compiles (the runtime would also reject; the types catch it earlier). The interface stays consistent across the two template kinds: declare your inputs, bind your args, await. No-args is no ceremony.
@@ -116,6 +116,5 @@ Semantics:
 - [ADR-0006: Unified queryable API](0006-queryable-api.md) — parent decision; `Query<T,O>` is the base type these templates extend.
 - [ADR-0007: Query result presentation](0007-query-result-presentation.md) — `q.meta()` carries output parameters and return status, typed by the procedure builder.
 - [ADR-0008: Query lifecycle and disposal](0008-query-lifecycle-and-disposal.md) — `PreparedStatement.dispose()` follows the uniform disposal contract.
-- [ADR-0011: Pool port](0011-pool-port.md) — connection pinning and return-on-dispose semantics.
 - [better-sqlite3 Statement API](https://github.com/WiseLibs/better-sqlite3/blob/master/docs/api.md#class-statement) — reference for the builder + bind pattern.
 - [pg prepared statements](https://node-postgres.com/features/queries#prepared-statements) — reference for re-executable handle semantics.

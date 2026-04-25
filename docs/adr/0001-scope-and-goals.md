@@ -53,10 +53,3 @@ Explicit non-goals:
 **A separate package (`mssql-next`, `@tediousjs/mssql-client`).** Considered because it avoids the `next-major` branch overhead. Rejected because it loses the accumulated npm trust, GitHub repo linking, and discoverability of the `mssql` package name.
 
 **A slow rewrite on `master` behind feature flags.** Rejected because the kernel-level changes (tagged-template API, hexagonal driver port, ESM-only) cannot be flagged.
-
-## References
-
-- [ADR-0002: Same-repo `next-major` branch strategy](0002-branch-strategy.md)
-- [ADR-0003: Runtime targets](0003-runtime-targets.md)
-- [ADR-0004: Monorepo layout](0004-monorepo-layout.md)
-- [ADR-0006: Unified queryable API](0006-queryable-api.md)

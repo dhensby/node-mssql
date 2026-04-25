@@ -12,7 +12,7 @@ The monorepo ([ADR-0004](0004-monorepo-layout.md)) needs an automated release pi
 2. Generates a per-package changelog.
 3. Publishes to GitHub releases and npm with provenance.
 4. Runs without manual version input.
-5. Fits the pre-release branch model ([ADR-0002](0002-branch-strategy.md)). The specific branch name is decided here, not in ADR-0002.
+5. Fits the pre-release branch model ([ADR-0002](0002-branch-strategy.md)).
 6. Supports independent per-package versioning, not lockstep ([ADR-0004](0004-monorepo-layout.md), Decision section).
 
 `semantic-release`, the tool ADR-0002 originally assumed, has no native monorepo support — issue [semantic-release#1688](https://github.com/semantic-release/semantic-release/issues/1688) has been open since November 2020 with no official roadmap. The community plugins (`semantic-release-monorepo`, `multi-semantic-release`) either lock everything in lockstep or fragment each package into a separate semantic-release run with hand-tuned path filtering. Neither is a foundation we want to build on for a long-lived multi-package library.

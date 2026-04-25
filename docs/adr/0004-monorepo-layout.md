@@ -35,7 +35,6 @@ Later additions (TVP, bulk, sqlcmd, testing mocks) will each be a new `packages/
 Rules:
 
 - **npm workspaces** (not pnpm, Yarn, Turborepo, Nx, Lerna). Prefer native Node and npm tooling over third-party tooling when the native option meets our needs; no `packageManager` field required; contributors do not need to install any additional CLI.
-- **Independent per-package versioning** ([ADR-0005](0005-release-and-ci.md)). Each `@tediousjs/mssql-*` package versions on its own commit history. A `fix(pool-tarn): …` bumps `@tediousjs/mssql-tarn` only; `mssql-core` does not republish for changes it had no part in. The meta `mssql` package depends on `@tediousjs/mssql-*` packages via **caret ranges** (`^13.x.y`) so that compatible patch and minor updates flow to consumers without a meta republish.
 - **Drivers declare `@tediousjs/mssql-core` as a peer dependency**, not a regular dependency. This guarantees a single shared copy of core at install time, so `instanceof` checks on error classes work across the library boundary. See [ADR-0017](0017-error-taxonomy.md).
 - **Private test-harness package**, never published. Shared infrastructure that all packages use for integration tests.
 

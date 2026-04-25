@@ -71,7 +71,16 @@ When v13 reaches stable, the `next` dist-tag is removed (`npm dist-tag rm mssql 
 
 ### Meta package dependency pinning
 
-The `mssql` meta package uses **caret ranges** (`^13.x.y`) on its `@tediousjs/mssql-*` deps, not exact pins. The npm resolver is free to pick up patch and minor updates without forcing a meta republish. When a material change warrants a new meta floor (e.g. a new feature in `mssql-core` that the meta should expose by default), the floor is bumped by a commit that touches `mssql/` (typically a `package.json` dep range update). This keeps the meta's release cadence honest without over-pinning.
+The `mssql` meta package pins **exact versions** of every `@tediousjs/mssql-*` dependency, and republishes whenever any of those dependencies republishes. Release-please's `node-workspace` plugin handles the mechanics: when a workspace dep's version changes, the plugin rewrites the meta's `package.json` in the same release PR, which release-please then treats as a change to `mssql/` and bumps the meta accordingly.
+
+Why exact pins:
+
+1. **Reproducibility for bug reports.** A `mssql@13.2.4` install resolves to exactly one set of sub-package versions. A user can paste the meta version into an issue and we know precisely what they have.
+2. **Crystallised fix sets.** Each meta release captures the set of fixes shipped in its sub-packages at that moment. Upgrading the meta picks up a known fix bundle, not a moving target resolved at install time.
+3. **Deliberate major handling.** A sub-package going to a new major requires the meta to opt in by editing the pin. Caret ranges would either silently absorb a sub-package major or (with `^0.x` semantics) be too conservative; neither is what we want. Exact pins make the meta's major-bump moments explicit and reviewable.
+4. **Canonical roll-up changelog.** The meta's release notes summarise the sub-package version changes that triggered the bump. Sub-packages keep their own detailed changelogs; the meta's is the umbrella view that upgrade tooling and human readers can follow without traversing every sub-package.
+
+**Lockfile updates.** release-please's `node-workspace` plugin updates the root `package-lock.json` alongside the per-package `package.json` updates in the release PR. As a guardrail, the release PR's CI runs `npm install --package-lock-only` and fails if that produces drift from what release-please wrote; if drift ever appears, an operator runs `npm install` and pushes the result before merging. This guards against the historical edge case where lockfile updates lagged dep updates in npm-workspaces monorepos ([release-please#1993](https://github.com/googleapis/release-please/issues/1993), since fixed).
 
 ### CI workflow layout
 
@@ -97,7 +106,7 @@ A practical caveat: Dependabot reads its config from the repository's **default 
 ## Consequences
 
 - **Independent versioning means honest version numbers.** A change confined to `packages/pool-tarn/` bumps only `@tediousjs/mssql-tarn`. `mssql-core` does not republish for a pool-adapter fix it had no part in.
-- **The meta `mssql` package republishes only when changes to `mssql/` warrant it.** Caret-range absorption of upstream patch/minor releases happens at install time without a republish.
+- **The meta `mssql` package republishes whenever a `@tediousjs/mssql-*` dependency republishes.** Exact pins on the meta's deps mean every sub-package release triggers a meta release in the same release PR. See "Meta package dependency pinning" above for why.
 - **Per-package changelogs** make per-package release notes easy to find. Users tracking only `mssql-core` see only its history.
 - **Conventional-Commit type discipline is enforced in CI** via commitlint. Type drift is a commitlint failure.
 - **Pre-releases follow a phased alpha → beta → rc → stable lifecycle**, with the phase encoded in the version (`13.0.0-alpha.N`, `13.0.0-beta.N`, `13.0.0-rc.N`) and all phases published under the `next` npm dist-tag. Consumers install with `npm i mssql@next` for the latest pre-release of any phase, or by exact version for a specific one — see "Pre-release lifecycle" above.
@@ -116,9 +125,9 @@ A practical caveat: Dependabot reads its config from the repository's **default 
 
 **Nx Release.** Rejected. We don't use Nx for the build, and adopting it just for releases is overkill ([ADR-0004](0004-monorepo-layout.md) already rejected Nx as a build tool).
 
-**Strict version lockstep across all packages** (the original ADR-0004 stance). Reconsidered: every package republishing on every change makes version numbers dishonest (a `fix(pool-tarn)` should not bump `core` from 13.0.5 to 13.0.6 unchanged), churns every consumer's lockfile, and provides convenience-for-us at cost-to-them. Independent versioning with the meta package using caret ranges accomplishes the same compatibility guarantee without the noise. ADR-0004's Decision section is amended to match.
+**Strict version lockstep across all packages.** Rejected. Every sub-package republishing on every change makes version numbers dishonest (a `fix(pool-tarn)` should not bump `core` from 13.0.5 to 13.0.6 unchanged) and churns every consumer's lockfile for changes they have no relationship to. Independent per-package versioning, with the meta package's exact pins providing a single rolled-up version number for users who want one, gives both audiences what they need without the cross-package noise.
 
-**`linked-versions` plugin to lockstep just `core` + `meta`.** Considered as a compromise — keep the kernel and the umbrella in sync so users have a single "v13 line" version to reason about. Rejected for now: it reintroduces the same dishonest-version-numbers problem on a smaller scale, and the meta package's caret ranges already give users the "one number to install" ergonomic. Easy to add later via `linked-versions` config if it proves useful.
+**`linked-versions` plugin to lockstep just `core` + `meta`.** Considered as a compromise — force the kernel and the umbrella to share a version number so users have a single "v13 line" to reason about. Rejected: with exact pins (above), the meta already bumps whenever core does, but its version stays its own — a meta-only change does not force a core republish, and a non-core sub-package bump can move the meta without touching core. `linked-versions` would reintroduce the dishonest-version-numbers problem on a smaller scale. Easy to add later via `linked-versions` config if version-number drift turns out to confuse consumers.
 
 ## References
 

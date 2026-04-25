@@ -31,7 +31,7 @@ The principle we are operating under: **do not exclude older Node versions witho
 ## Consequences
 
 - Consumers on Node 20.3+ can use v13 at launch. This broadens the addressable install base substantially compared to a Node 22 floor.
-- Consumers on Node 18 cannot use v13. v12 remains on `latest` for them for the foreseeable future.
+- Consumers on Node 18 cannot use v13 and must stay on v12 until they upgrade their runtime. Node 18 reached end-of-life in March 2025, so the affected population should already be planning a runtime upgrade independent of v13.
 - Consumers using CommonJS must use dynamic `import()` or migrate to ESM. This is a real cost and we accept it — the alternative is permanent dual-publish tax.
 - The test matrix is one entry larger than a Node-22-only policy would be. This is a small ongoing CI cost for a meaningful adoption benefit.
 - The TS `await using` downlevel adds a handful of bytes of helper code per file that uses it. Negligible.

@@ -1,6 +1,6 @@
 # ADR-0001: Scope and goals of the v13 rewrite
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-22
 - **Deciders:** @dhensby
 
@@ -42,7 +42,7 @@ Explicit non-goals:
 
 - Existing consumers of v12 cannot upgrade without code changes. This is acknowledged and accepted. A migration guide will be provided.
 - The release cadence of v12 will slow as maintenance focus shifts to v13, but v12 will continue to receive security and bug fixes until v13 is stable.
-- The rewrite is a multi-quarter effort. During that time `v12.x` on `latest` and `v13.0.0-next-major.*` on `next-major` will coexist on npm.
+- The rewrite is a multi-quarter effort. During that time `v12.x` on `latest` and the v13 pre-release on `next-major` will coexist on npm.
 - Downstream ORMs that wrap the current library will need to either migrate or pin v12. This is an opportunity to offer them a cleaner driver-level integration.
 - The breadth of the rewrite is high-risk. Risk is managed by (a) locking design decisions in ADRs before implementing, (b) prototyping the three highest-risk design points as throwaway spikes first, and (c) integration-testing everything against a real SQL Server from the first commit.
 

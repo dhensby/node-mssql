@@ -8,11 +8,11 @@
 
 The monorepo ([ADR-0004](0004-monorepo-layout.md)) needs an automated release pipeline that:
 
-1. Calculates each package's version from its own commit history (Conventional Commits scoped to package).
+1. Calculates each package's version from the commits whose changed paths touch that package, using Conventional-Commit types to determine the bump level.
 2. Generates a per-package changelog.
 3. Publishes to GitHub releases and npm with provenance.
 4. Runs without manual version input.
-5. Fits the `next-major` pre-release branch model ([ADR-0002](0002-branch-strategy.md)).
+5. Fits the pre-release branch model ([ADR-0002](0002-branch-strategy.md)). The specific branch name is decided here, not in ADR-0002.
 6. Supports independent per-package versioning, not lockstep ([ADR-0004](0004-monorepo-layout.md), Decision section).
 
 `semantic-release`, the tool ADR-0002 originally assumed, has no native monorepo support — issue [semantic-release#1688](https://github.com/semantic-release/semantic-release/issues/1688) has been open since November 2020 with no official roadmap. The community plugins (`semantic-release-monorepo`, `multi-semantic-release`) either lock everything in lockstep or fragment each package into a separate semantic-release run with hand-tuned path filtering. Neither is a foundation we want to build on for a long-lived multi-package library.
@@ -21,40 +21,49 @@ We also need automated dependency updates across every workspace package's `pack
 
 ## Decision
 
+### Pre-release branch
+
+The v13 work lives on a long-lived branch named **`next-major`** in `tediousjs/node-mssql`. The name is inherited from the `semantic-release` default convention this repo was originally configured for. We are no longer using `semantic-release` for v13 (see "Release tooling" below), but the branch name is kept deliberately:
+
+- Renaming a long-lived branch mid-rewrite is gratuitous churn for contributors and tooling.
+- `next-major` is a conventional name for "the next major version's pre-release branch" and communicates intent to contributors landing on the repo without further explanation.
+- Branch lifecycle and merge semantics are owned by [ADR-0002](0002-branch-strategy.md); ADR-0002 is deliberately branch-name-agnostic so the choice stays reversible without invalidating that ADR.
+
 ### Release tooling: `release-please` in manifest mode
 
 Run `release-please` via `googleapis/release-please-action` in *manifest mode* — the multi-package release model release-please was built for. Configuration lives in `.github/release-please-config.json`; current per-package versions live in `.release-please-manifest.json` (release-please writes to it on every release).
 
 Rules:
 
-- **Independent per-package versioning.** Each package's version is computed from Conventional-Commit messages whose scope matches the package directory:
-  - `feat(core): …` → bumps `@tediousjs/mssql-core`.
-  - `fix(driver-tedious): …` → bumps `@tediousjs/mssql-tedious`.
-  - `feat(pool-tarn): …` → bumps `@tediousjs/mssql-tarn`.
-  - `feat(meta): …` → bumps the meta `mssql` package.
+- **Independent per-package versioning, by changed path.** release-please's manifest mode maps each package directory in `.github/release-please-config.json` to an `@tediousjs/mssql-*` package. Commits whose changed files fall under that directory contribute to that package's next version; commits that touch no package directory contribute to none. A commit that changes files in two package directories contributes to both. The Conventional-Commit *type* (`feat`/`fix`/`perf`/`!`) on each commit determines the bump level (minor/patch/patch/major).
 - **One release PR per package.** When a branch has unreleased commits in a package's path, release-please opens or updates a `chore(<pkg>): release <version>` PR. Merging the PR cuts the tag, generates the changelog entry, and triggers a paired npm-publish job. No human is asked for a version number.
 - **Per-package tags and changelogs.** Tags follow `<package-name>-v<version>` (e.g. `mssql-core-v13.2.0`). Each package owns its own `CHANGELOG.md`.
-- **Pre-release on `next-major`.** Configured via `prerelease: true` and `prerelease-type: "next-major"`, producing versions like `13.0.0-next-major.N`. The npm dist-tag remains `next-major`; consumers opt in with `npm i mssql@next-major`.
-- **The release-please job runs from day one on `next-major`.** It opens and updates release PRs throughout the rewrite so the changelog assembles in real time and the team can sanity-check what a release would look like at any point.
-- **The npm-publish step is gated** behind a workflow conditional and does not fire until v13 is ready for early adopters. See [ADR-0002](0002-branch-strategy.md) for the broader gate. The conditional is documented inline in `.github/workflows/release-next-major.yml` and is lifted by removing it (or flipping a single boolean).
+- **Pre-release configuration.** `prerelease: true` and `prerelease-type: "next-major"`, producing versions like `13.0.0-next-major.N`. The npm dist-tag is `next-major`; consumers opt in with `npm i mssql@next-major`.
+- **The release-please job runs from day one.** It opens and updates release PRs throughout the rewrite so the changelog assembles in real time and the team can sanity-check what a release would look like at any point.
+- **The npm-publish step is gated** behind a workflow conditional and does not fire until v13 is ready for early adopters — release-please continues to update release PRs in the meantime, but no version actually publishes to npm until the gate is lifted. The conditional is documented inline in `.github/workflows/release-next-major.yml` and is lifted by removing it (or flipping a single boolean).
 - **`master` continues to use `semantic-release`** for v12 maintenance until the v13.0 merge. After the merge, `master`'s release tooling switches to release-please as well, with the prerelease config swapped for stable.
 
-### Conventional-Commit scope policy
+### Conventional-Commit policy
 
-Scopes map directly to package directories:
+Two distinct things drive release-please:
 
-| Scope                  | Package                              |
-|------------------------|--------------------------------------|
-| `core`                 | `@tediousjs/mssql-core`              |
-| `driver-tedious`       | `@tediousjs/mssql-tedious`           |
-| `driver-msnodesqlv8`   | `@tediousjs/mssql-msnodesqlv8`       |
-| `pool-tarn`            | `@tediousjs/mssql-tarn`              |
-| `meta`                 | `mssql` (umbrella package)           |
-| `release`, `deps`, `ci`, `docs`, `monorepo`, `adr` | non-package; no version bump |
+- **Commit type** — `feat:` / `fix:` / `perf:` / `!` (or `BREAKING CHANGE:` in the body) — determines the version bump (minor / patch / patch / major). Type is enforced in CI by commitlint.
+- **Changed paths** — which files the commit modified — determine which package(s) are affected. release-please walks `git log` for each package's directory in `.github/release-please-config.json` and considers only commits that touched files there.
 
-`feat`/`fix`/`perf` commits **must** carry a package scope. `chore`/`ci`/`docs`/`refactor`/`test` may use either a package scope or a non-package scope. Cross-cutting changes either split into multiple commits or use `BREAKING CHANGE:` / `!` if a coordinated cross-package break is intended; release-please will then bump every affected package as a major together.
+The conventional-commit **scope** is *not* what associates commits with packages — that is path-based, not message-based. Scope is a human-readable label that helps reviewers see at a glance which package a commit is intended to affect, and it groups changelog entries cleanly. We encourage scopes that match the package directory (e.g. `feat(core): …`, `fix(pool-tarn): …`) but **do not enforce them in CI**: a contributor who omits or mistypes the scope still gets a correct release because release-please reads the paths. The commitlint config deliberately omits a strict `scope-enum` rule — requiring contributors to memorise an exact scope vocabulary is friction we get nothing for.
 
-The commitlint config enforces this via `scope-enum`.
+Recommended scopes (match these to the directory the commit changes):
+
+| Scope                  | Package directory                      |
+|------------------------|----------------------------------------|
+| `core`                 | `packages/core`                        |
+| `driver-tedious`       | `packages/driver-tedious`              |
+| `driver-msnodesqlv8`   | `packages/driver-msnodesqlv8`          |
+| `pool-tarn`            | `packages/pool-tarn`                   |
+| `meta`                 | `mssql/`                               |
+| `release`, `deps`, `ci`, `docs`, `monorepo`, `adr` | non-package commits; typically touch no package directory and produce no version bump |
+
+Cross-cutting changes that touch multiple package directories result in multiple packages being bumped automatically — there is no need to split such commits to "trigger" the right packages. Splitting is preferred for *changelog clarity*, not correctness. A coordinated cross-package break uses `!` or `BREAKING CHANGE:` and release-please majors every affected package together.
 
 ### Meta package dependency pinning
 
@@ -86,7 +95,7 @@ A practical caveat: Dependabot reads its config from the repository's **default 
 - **Independent versioning means honest version numbers.** A `fix(pool-tarn): …` commit bumps only `@tediousjs/mssql-tarn`. `mssql-core` does not republish for a pool-adapter fix it had no part in.
 - **The meta `mssql` package republishes only when a `feat(meta):` / `fix(meta):` warrants it.** Caret-range absorption of upstream patch/minor releases happens at install time without a republish.
 - **Per-package changelogs** make per-package release notes easy to find. Users tracking only `mssql-core` see only its history.
-- **Conventional-Commit scope discipline becomes a hard requirement** enforced in CI. Existing commit history on `next-major` already follows this convention; any drift is a commitlint failure.
+- **Conventional-Commit type discipline is enforced in CI** via commitlint. Scope discipline is recommended (matching scopes to package directories aids changelog readability) but not enforced — release routing depends on changed paths, not on the message scope. Existing commit history on `next-major` already follows the convention by habit; type drift is a commitlint failure, but a typo or omitted scope is harmless.
 - **Pre-release versions on `next-major` are `13.0.0-next-major.N`** — same shape `semantic-release` would have produced. The `next-major` dist-tag is preserved; consumers' `npm i mssql@next-major` story is unchanged.
 - **Dependabot covers every workspace package automatically as new ones bootstrap.** No per-package config maintenance required — the `/packages/*` glob handles it.
 - **The Dependabot config landing on `next-major` only takes effect once it also lands on `master`.** A one-time sync; once both branches carry the same config, workspace updates flow correctly. Documented above.
@@ -114,5 +123,5 @@ A practical caveat: Dependabot reads its config from the repository's **default 
 - [release-please-action](https://github.com/googleapis/release-please-action) — the GitHub Action.
 - [semantic-release issue #1688](https://github.com/semantic-release/semantic-release/issues/1688) — the still-open monorepo support thread.
 - [Dependabot configuration reference](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference)
-- [ADR-0002: Same-repo `next-major` branch strategy](0002-branch-strategy.md)
+- [ADR-0002: Same-repo pre-release branch strategy](0002-branch-strategy.md)
 - [ADR-0004: Monorepo with npm workspaces](0004-monorepo-layout.md)

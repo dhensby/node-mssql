@@ -40,7 +40,7 @@ Rules:
 - **One release PR per package.** When a branch has unreleased commits in a package's path, release-please opens or updates a `chore(<pkg>): release <version>` PR. Merging the PR cuts the tag, generates the changelog entry, and triggers a paired npm-publish job. No human is asked for a version number.
 - **Per-package tags and changelogs.** Tags follow `<package-name>-v<version>` (e.g. `mssql-core-v13.2.0`). Each package owns its own `CHANGELOG.md`.
 - **Phased pre-releases.** `prerelease: true` is set in release-please's config; the `prerelease-type` field drives the phase identifier (`alpha`, `beta`, `rc`). See the "Pre-release lifecycle" subsection below for what each phase signals and how transitions work.
-- **The release-please workflow is gated until we begin the alpha phase.** The workflow file lives in the repo, but the entire job (release PR generation and npm-publish) is wrapped in a workflow conditional that defaults to off. While off, release-please does not run on push — no release PRs accumulate and nothing publishes to npm. The gate is flipped on when the project has made enough progress that cutting alpha releases makes sense (see "Pre-release lifecycle"). The conditional is documented inline in `.github/workflows/release-next-major.yml` and is flipped by changing a single boolean.
+- **The release-please job is gated until we begin the alpha phase.** The job lives in `nodejs.yml` on the `next-major` branch, but the entire job (release PR generation and npm-publish) is wrapped in a workflow conditional that defaults to off. While off, release-please does not run on push — no release PRs accumulate and nothing publishes to npm. The gate is flipped on when the project has made enough progress that cutting alpha releases makes sense (see "Pre-release lifecycle"). The conditional is documented inline in the workflow file and is flipped by changing a single boolean.
 - **`master` continues to use `semantic-release`** for v12 maintenance until the v13.0 merge. After the merge, `master`'s release tooling switches to release-please as well, with the prerelease config swapped for stable.
 
 ### Conventional-Commit policy
@@ -93,11 +93,10 @@ A maintainer who merges the meta release PR after the first sub-package publishe
 
 Workflows live in `.github/workflows/`:
 
-- `nodejs.yml` — existing build/test/release workflow. Continues to handle `master` builds and v12's `semantic-release` release job. The `next-major` exclusion on the existing `release` job stays.
-- `release-next-major.yml` — new workflow. Runs `release-please` on every push to `next-major` to open/update release PRs. The npm-publish job is gated.
+- `nodejs.yml` — build/test/release workflow. The two long-lived branches carry diverging copies: on `master` the release job continues to run `semantic-release` for v12 maintenance; on `next-major` the release job is rewritten in-branch to run `release-please` (opening release PRs, gated npm-publish). The `next-major` exclusion on `master`'s release job is no longer needed on the `next-major` copy — the file there only has to know how to release `next-major`.
 - `gh-pages.yml` — existing docs publish, unchanged.
 
-When v13 ships and `next-major` is merged into `master` ([ADR-0002](0002-branch-strategy.md)), the `master` release switches from `semantic-release` to `release-please`. Either by replacing the `release` job in `nodejs.yml` or by promoting `release-next-major.yml` to `release.yml` with the prerelease config swapped for stable.
+No new workflow file is introduced. When v13 ships and `next-major` is merged into `master` ([ADR-0002](0002-branch-strategy.md)), the merge brings the release-please version of `nodejs.yml` onto `master`, replacing the semantic-release version. The prerelease config in `.github/release-please-config.json` is flipped to stable as part of the same release procedure.
 
 ### Dependency automation: Dependabot
 

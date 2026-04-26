@@ -82,6 +82,13 @@ Why exact pins:
 
 **Lockfile updates.** release-please's `node-workspace` plugin updates the root `package-lock.json` alongside the per-package `package.json` updates in the release PR. As a guardrail, the release PR's CI runs `npm install --package-lock-only` and fails if that produces drift from what release-please wrote; if drift ever appears, an operator runs `npm install` and pushes the result before merging. This guards against the historical edge case where lockfile updates lagged dep updates in npm-workspaces monorepos ([release-please#1993](https://github.com/googleapis/release-please/issues/1993), since fixed).
 
+**Cross-package atomicity.** A fix that touches multiple sub-packages produces one release PR per affected sub-package plus a meta release PR. The `node-workspace` plugin re-renders the meta PR each time a sub-package release PR merges, so the meta PR's pins always reflect the latest published versions of every sub-package. The merge order for an atomic cross-package fix is therefore:
+
+1. Merge each affected sub-package's release PR (order does not matter; each publishes independently).
+2. Once all of them have published, merge the meta release PR — it will pin the new versions of every affected sub-package together.
+
+A maintainer who merges the meta release PR after the first sub-package publishes but before the others have would publish a meta version with mixed pins (some sub-packages on the new fix, some on the prior version). This is operator discipline, not tooling-enforced. The mitigation is a documented release procedure (in `RELEASING.md`) plus a meta-release PR template that surfaces the currently-open sub-package release PRs and asks the maintainer to confirm they have all merged before merging the meta. A stronger CI gate — block the meta publish job if any other release-please PR is open — is deferred until real-world experience shows the procedure alone is insufficient.
+
 ### CI workflow layout
 
 Workflows live in `.github/workflows/`:
@@ -107,6 +114,7 @@ A practical caveat: Dependabot reads its config from the repository's **default 
 
 - **Independent versioning means honest version numbers.** A change confined to `packages/pool-tarn/` bumps only `@tediousjs/mssql-tarn`. `mssql-core` does not republish for a pool-adapter fix it had no part in.
 - **The meta `mssql` package republishes whenever a `@tediousjs/mssql-*` dependency republishes.** Exact pins on the meta's deps mean every sub-package release triggers a meta release in the same release PR. See "Meta package dependency pinning" above for why.
+- **Cross-package fixes land atomically on the meta when the merge order is followed.** A fix touching multiple sub-packages produces one release PR per affected sub-package plus a meta PR; merging all sub-package PRs first and the meta PR last results in a single meta version that pins the new fix in every affected sub-package. The "merge order" risk (a meta PR merged early shipping mixed pins) is mitigated by documented procedure and a PR-template prompt, not tooling-enforced — see "Cross-package atomicity" above.
 - **Per-package changelogs** make per-package release notes easy to find. Users tracking only `mssql-core` see only its history.
 - **Conventional-Commit type discipline is enforced in CI** via commitlint. Type drift is a commitlint failure.
 - **Pre-releases follow a phased alpha → beta → rc → stable lifecycle**, with the phase encoded in the version (`13.0.0-alpha.N`, `13.0.0-beta.N`, `13.0.0-rc.N`) and all phases published under the `next` npm dist-tag. Consumers install with `npm i mssql@next` for the latest pre-release of any phase, or by exact version for a specific one — see "Pre-release lifecycle" above.

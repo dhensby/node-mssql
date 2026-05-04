@@ -1,8 +1,6 @@
-version: '3'
-
 services:
   app:
-    image: "mcr.microsoft.com/vscode/devcontainers/javascript-node:14"
+    image: "mcr.microsoft.com/devcontainers/typescript-node:22"
 
     volumes:
       - "..:/workspace:cached"
@@ -13,11 +11,14 @@ services:
     depends_on:
       - mssql
 
+  # Uses azure-sql-edge rather than mssql/server because the latter has no
+  # ARM64 image — running natively on Apple silicon (and other ARM hosts)
+  # requires the edge image. Functionally equivalent for the v13 test suite.
   mssql:
-    image: "mcr.microsoft.com/mssql/server:2019-latest"
+    image: "mcr.microsoft.com/azure-sql-edge:latest"
 
     restart: unless-stopped
 
     environment:
       - "ACCEPT_EULA=Y"
-      - "SA_PASSWORD=yourStrong(!)Password"
+      - "MSSQL_SA_PASSWORD=yourStrong(!)Password"

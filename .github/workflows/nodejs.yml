@@ -22,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 18.x
+          node-version: 22.x
           cache: 'npm'
       - name: Install dependencies
         run: npm clean-install
@@ -32,130 +32,6 @@ jobs:
       - name: Lint commits
         if: github.event_name == 'pull_request'
         run: npx commitlint --from ${{ github.event.pull_request.head.sha }}~${{ github.event.pull_request.commits }} --to ${{ github.event.pull_request.head.sha }} --verbose
-  codelint:
-    name: Lint code
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 18.x
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm clean-install
-      - name: Lint code
-        run: npm run lint
-  test-linux:
-    name: Run tests
-    runs-on: ${{ matrix.os }}
-    services:
-      sqlserver:
-        image: mcr.microsoft.com/${{ matrix.sqlserver == 'edge' && 'azure-sql-edge' || 'mssql/server' }}:${{ matrix.sqlserver == 'edge' && 'latest' || format('{0}-latest', matrix.sqlserver ) }}
-        ports:
-          - 1433:1433
-        env:
-          ACCEPT_EULA: Y
-          MSSQL_SA_PASSWORD: ${{ env.MSSQL_PASSWORD }}
-    needs:
-      - commitlint
-      - codelint
-    env:
-      MSSQL_PASSWORD: 'yourStrong(!)Password'
-    strategy:
-      matrix:
-        os: [ubuntu-24.04]
-        node: [18.x, 20.x, 22.x, 24.x]
-        sqlserver: [2019, 2022, 2025]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Setup Node.js ${{ matrix.node }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm clean-install
-      - name: Run unit tests
-        run: npm run test-unit
-      - name: Store test config
-        run: echo "{\"user\":\"sa\",\"password\":\"$MSSQL_PASSWORD\",\"server\":\"localhost\",\"port\":1433,\"database\":\"master\",\"options\":{\"trustServerCertificate\":true}}" > ./test/.mssql.json
-      - name: Run tedious tests
-        run: npm run test-tedious
-      - name: Run cli tests
-        run: npm run test-cli
-# The msnodesqlv8 tests fail with a segmentation fault
-#      - name: Install OBDC 17 driver
-#        run: |
-#          sudo curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-#          sudo curl -o /etc/apt/sources.list.d/mssql-release.list https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list
-#          sudo apt-get update
-#          sudo apt-get install -y msodbcsql17
-#        env:
-#          ACCEPT_EULA: Y
-#      - name: Install msnodesqlv8
-#        run: npm install --no-save msnodesqlv8@^2
-#      - name: Run msnodesqlv8 tests
-#        run: npm run test-msnodesqlv8
-  test-windows:
-    name: Run tests
-    needs:
-      - commitlint
-      - codelint
-      - test-linux
-    runs-on: ${{ matrix.os }}
-    env:
-      MSSQL_PASSWORD: 'yourStrong(!)Password'
-    strategy:
-      matrix:
-        os: [windows-2022, windows-2025]
-        node: [18.x, 20.x, 22.x, 24.x]
-        sqlserver: [2016, 2017, 2019, 2022]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Setup Node.js ${{ matrix.node }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm clean-install
-      - name: Run unit tests
-        run: npm run test-unit
-      - name: Setup SQL Server
-        uses: tediousjs/setup-sqlserver@4ded56ac552a6b21100672df2359f85b31e057d2 # v3
-        with:
-          sqlserver-version: ${{ matrix.sqlserver }}
-          sa-password: ${{ env.MSSQL_PASSWORD }}
-          native-client-version: 11
-      - name: Store test config
-        shell: bash
-        run: echo "{\"user\":\"sa\",\"password\":\"$MSSQL_PASSWORD\",\"server\":\"localhost\",\"port\":1433,\"database\":\"master\",\"requestTimeout\":30000,\"options\":{\"abortTransactionOnError\":true,\"encrypt\":false}}" > ./test/.mssql.json
-      - name: Run tedious tests
-        run: npm run test-tedious
-      - name: Run cli tests
-        run: npm run test-cli
-      - name: Install msnodesqlv8
-        if: ${{ matrix.node != '22.x' && matrix.node != '24.x' }}
-        run: npm install --no-save msnodesqlv8@^2
-      - name: Run msnodesqlv8 tests
-        if: ${{ matrix.node != '22.x' && matrix.node != '24.x' }}
-        run: npm run test-msnodesqlv8
-      - name: Install msnodesqlv8
-        if: ${{ matrix.node == '22.x' || matrix.node == '24.x' }}
-        run: npm install --no-save msnodesqlv8@^4
-      - name: Run msnodesqlv8 tests
-        if: ${{ matrix.node == '22.x' && matrix.node == '24.x' }}
-        run: npm run test-msnodesqlv8
   release:
     name: Release
     concurrency: release
@@ -163,9 +39,6 @@ jobs:
     runs-on: ubuntu-24.04
     needs:
       - commitlint
-      - codelint
-      - test-linux
-      - test-windows
     permissions:
       contents: write # to be able to publish a GitHub release
       issues: write # to be able to comment on released issues

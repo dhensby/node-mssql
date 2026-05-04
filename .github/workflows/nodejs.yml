@@ -32,13 +32,91 @@ jobs:
       - name: Lint commits
         if: github.event_name == 'pull_request'
         run: npx commitlint --from ${{ github.event.pull_request.head.sha }}~${{ github.event.pull_request.commits }} --to ${{ github.event.pull_request.head.sha }} --verbose
-  release:
-    name: Release
-    concurrency: release
-    if: ${{ github.repository_owner == 'tediousjs' && github.event_name == 'push' && github.actor != 'dependabot[bot]' }}
+  codelint:
+    name: Lint code
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm clean-install
+      - name: Lint packages
+        run: npm run lint:packages
+  test-workspaces:
+    name: Build & test workspaces (Node ${{ matrix.node }})
     runs-on: ubuntu-24.04
     needs:
       - commitlint
+      - codelint
+    strategy:
+      matrix:
+        # Matches the v13 engines field (>=20.3.0) — Node 18 is intentionally
+        # excluded because the v13 rewrite targets the AbortSignal.any / native
+        # diagnostics_channel.tracingChannel surface that only stabilised in 20.3+.
+        node: [20.x, 22.x, 24.x]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm clean-install
+      - name: Build workspaces
+        run: npm run build:workspaces
+      - name: Test workspaces
+        run: npm run test:workspaces
+  coverage-workspaces:
+    name: Coverage thresholds (Node 22)
+    runs-on: ubuntu-24.04
+    needs:
+      - commitlint
+      - codelint
+    # Coverage thresholds rely on the `--test-coverage-lines` /
+    # `--test-coverage-functions` / `--test-coverage-branches` CLI flags,
+    # which were stabilised in Node 22. Test on a single recent Node version;
+    # the per-Node test matrix (test-workspaces) covers compatibility.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm clean-install
+      - name: Build workspaces
+        run: npm run build:workspaces
+      - name: Run coverage with thresholds
+        run: npm run test:coverage:workspaces
+  release:
+    name: Release
+    concurrency: release
+    # The `next-major` exclusion disables semantic-release on the v13 rewrite branch during
+    # early development, to avoid publishing pre-releases before the library is ready for
+    # external adopters. Remove the `github.ref != 'refs/heads/next-major'` clause when we
+    # want to start shipping `13.0.0-next-major.N` alpha releases. See docs/adr/0002-branch-strategy.md.
+    if: ${{ github.repository_owner == 'tediousjs' && github.event_name == 'push' && github.actor != 'dependabot[bot]' && github.ref != 'refs/heads/next-major' }}
+    runs-on: ubuntu-24.04
+    needs:
+      - commitlint
+      - codelint
+      - test-workspaces
+      - coverage-workspaces
     permissions:
       contents: write # to be able to publish a GitHub release
       issues: write # to be able to comment on released issues

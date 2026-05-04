@@ -1,0 +1,32 @@
+# Local SQL Server for v13 integration tests.
+#
+# Spin up:    docker compose up -d
+# Tear down:  docker compose down -v
+#
+# Image: azure-sql-edge rather than mssql/server because the latter has no
+# ARM64 image — running natively on Apple silicon (and other ARM hosts)
+# requires the edge image. Functionally equivalent for the v13 test suite.
+#
+# Defaults match the env-var fallbacks in
+# `packages/tedious/test/integration.ts`. Running `npm run test:int` from a
+# package directory will connect to this container if MSSQL_TEST_PASSWORD is
+# exported (matching the SA password below). Override any variable in your
+# shell to point at a different server (CI-hosted, dev DB, etc.).
+
+services:
+  mssql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    container_name: mssql-v13-integration
+    environment:
+      ACCEPT_EULA: '1'
+      MSSQL_SA_PASSWORD: ${MSSQL_TEST_PASSWORD:-yourStrong(!)Password}
+    ports:
+      - '${MSSQL_TEST_PORT:-1433}:1433'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s

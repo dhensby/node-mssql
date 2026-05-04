@@ -1,0 +1,83 @@
+name: Release (next-major)
+
+# Drives the release-please workflow for the v13 monorepo on the `next-major`
+# branch. release-please opens / updates a per-package `chore(<pkg>): release
+# <version>` PR; merging that PR cuts the tag and (when the npm-publish gate
+# below is lifted) triggers the paired publish job.
+#
+# See docs/adr/0005-release-and-ci.md for the broader release model and
+# docs/adr/0002-branch-strategy.md for the branch lifecycle.
+
+on:
+  push:
+    branches:
+      - next-major
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    name: release-please
+    if: ${{ github.repository_owner == 'tediousjs' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      paths_released: ${{ steps.release.outputs.paths_released }}
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: .github/release-please-config.json
+          manifest-file: .release-please-manifest.json
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    name: Publish to npm
+    needs: release-please
+    # NPM PUBLISH GATE.
+    #
+    # The `&& false` clause keeps this job inert during early v13 development
+    # so that release-please can build changelogs and per-package release PRs
+    # without publishing `13.0.0-next-major.N` versions that no consumer can
+    # usefully install yet.
+    #
+    # When v13 is ready for early adopters, remove `&& false` (or flip it to
+    # `&& true`) and merging a release PR will publish to npm under the
+    # `next-major` dist-tag. See docs/adr/0005-release-and-ci.md and
+    # docs/adr/0002-branch-strategy.md.
+    if: ${{ needs.release-please.outputs.releases_created == 'true' && false }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        path: ${{ fromJson(needs.release-please.outputs.paths_released) }}
+    permissions:
+      contents: read
+      id-token: write # OIDC for npm provenance.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Install dependencies
+        run: npm clean-install
+      - name: Verify provenance attestations and registry signatures
+        run: npm audit signatures
+      - name: Build workspaces
+        run: npm run build:workspaces
+      - name: Publish ${{ matrix.path }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
+        run: npm publish --workspace=${{ matrix.path }} --tag=next-major --access=public

@@ -1,23 +1,28 @@
 {
-  "name": "tediousjs/node-mssql",
+	"name": "tediousjs/node-mssql (v13)",
 
-  "dockerComposeFile": "docker-compose.yml",
-  "service": "app",
+	"dockerComposeFile": "docker-compose.yml",
+	"service": "app",
 
-  "workspaceFolder": "/workspace",
+	"workspaceFolder": "/workspace",
 
-  "settings": {
-    "terminal.integrated.shell.linux": "/bin/bash"
-  },
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-mssql.mssql",
+				"dbaeumer.vscode-eslint"
+			]
+		}
+	},
 
-  "extensions": [
-    "ms-mssql.mssql",
-    "dbaeumer.vscode-eslint"
-  ],
+	"postCreateCommand": "npm install",
 
-  "postCreateCommand": "cp -n .devcontainer/.mssql.json test/.mssql.json && npm install",
-
-  "containerEnv": {
-    "EDITOR": "code --wait"
-  }
+	"containerEnv": {
+		"EDITOR": "code --wait",
+		"MSSQL_TEST_HOST": "mssql",
+		"MSSQL_TEST_PORT": "1433",
+		"MSSQL_TEST_USER": "sa",
+		"MSSQL_TEST_PASSWORD": "yourStrong(!)Password",
+		"MSSQL_TEST_DATABASE": "master"
+	}
 }

@@ -35,5 +35,13 @@
   "license": "MIT",
   "engines": {
     "node": ">=20.3.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build:workspaces": "npm run build --workspaces --if-present",
+    "test:workspaces": "npm test --workspaces --if-present",
+    "test:coverage:workspaces": "npm run test:coverage --workspaces --if-present"
   }
 }

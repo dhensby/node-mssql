@@ -3,3 +3,7 @@ node_modules
 /test/.mssql.json
 /test.js
 .vscode
+.claude/
+packages/*/dist
+packages/*/dist-test
+packages/*/*.tsbuildinfo

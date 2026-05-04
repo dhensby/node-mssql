@@ -33,6 +33,21 @@
     "url": "https://github.com/tediousjs/node-mssql/issues"
   },
   "license": "MIT",
+  "devDependencies": {
+    "@commitlint/cli": "^20.0.0",
+    "@commitlint/config-conventional": "^20.0.0",
+    "@eslint/js": "^10.0.1",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/github": "^12.0.6",
+    "@semantic-release/npm": "^13.1.5",
+    "@semantic-release/release-notes-generator": "^14.1.0",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@tsconfig/node20": "^20.1.9",
+    "@types/node": "^20.0.0",
+    "eslint": "^10.3.0",
+    "semantic-release": "^25.0.3",
+    "typescript-eslint": "^8.59.2"
+  },
   "engines": {
     "node": ">=20.3.0"
   },
@@ -40,6 +55,8 @@
     "packages/*"
   ],
   "scripts": {
+    "commitlint": "commitlint --from origin/master --to HEAD",
+    "lint:packages": "eslint packages",
     "build:workspaces": "npm run build --workspaces --if-present",
     "test:workspaces": "npm test --workspaces --if-present",
     "test:coverage:workspaces": "npm run test:coverage --workspaces --if-present"

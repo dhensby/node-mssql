@@ -49,6 +49,11 @@ const fakeDriver: Driver = {
 	},
 };
 
+const fakeDriverOptions: DriverOptions = {
+	credential: { kind: 'integrated' },
+	transport: { host: 'db.local' },
+};
+
 class FakePool implements Pool {
 	readonly ctx: PoolContext;
 	#state: PoolState = 'open';
@@ -63,10 +68,7 @@ class FakePool implements Pool {
 		return this.#stats;
 	}
 	async acquire(): Promise<PooledConnection> {
-		const connection = await this.ctx.driver.open({
-			credential: { kind: 'integrated' },
-			transport: { host: 'db.local' },
-		});
+		const connection = await this.ctx.driver.open(this.ctx.driverOptions);
 		if (this.ctx.hooks?.onAcquire) {
 			await this.ctx.hooks.onAcquire(this.ctx.bindQueryable(connection));
 		}
@@ -103,10 +105,34 @@ const bindQueryable = (_conn: Connection): Queryable => queryableStub;
 
 describe('PoolFactory', () => {
 	test('produces a Pool from a PoolContext', async () => {
-		const pool = fakePoolFactory({ driver: fakeDriver, bindQueryable });
+		const pool = fakePoolFactory({
+			driver: fakeDriver,
+			driverOptions: fakeDriverOptions,
+			bindQueryable,
+		});
 		assert.equal(pool.state, 'open');
 		const pooled = await pool.acquire();
 		assert.equal(pooled.connection.id, 'conn_factory_1');
+	});
+
+	test('threads driverOptions through to driver.open()', async () => {
+		const seen: DriverOptions[] = [];
+		const recordingDriver: Driver = {
+			name: 'recording',
+			types: {},
+			async open(opts) {
+				seen.push(opts);
+				return new FakeConnection();
+			},
+		};
+		const pool = fakePoolFactory({
+			driver: recordingDriver,
+			driverOptions: fakeDriverOptions,
+			bindQueryable,
+		});
+		await pool.acquire();
+		assert.equal(seen.length, 1);
+		assert.equal(seen[0], fakeDriverOptions);
 	});
 });
 
@@ -116,6 +142,7 @@ describe('PoolContext hooks', () => {
 		const released: Queryable[] = [];
 		const pool = fakePoolFactory({
 			driver: fakeDriver,
+			driverOptions: fakeDriverOptions,
 			bindQueryable,
 			hooks: {
 				onAcquire: async (sql) => {
@@ -135,7 +162,11 @@ describe('PoolContext hooks', () => {
 	});
 
 	test('optional; factory works without hooks', async () => {
-		const pool = fakePoolFactory({ driver: fakeDriver, bindQueryable });
+		const pool = fakePoolFactory({
+			driver: fakeDriver,
+			driverOptions: fakeDriverOptions,
+			bindQueryable,
+		});
 		const pooled = await pool.acquire();
 		await pooled.release();
 		assert.equal(pool.state, 'open');

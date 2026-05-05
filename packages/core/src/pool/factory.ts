@@ -1,4 +1,4 @@
-import type { Connection, Driver } from '../driver/index.js';
+import type { Connection, Driver, DriverOptions } from '../driver/index.js';
 import type { PoolHooks, Queryable } from './hooks.js';
 import type { Pool } from './pool.js';
 
@@ -26,6 +26,11 @@ export interface PoolOptions<N = unknown> {
 
 export interface PoolContext {
 	readonly driver: Driver
+	// Credential + transport the factory passes into `driver.open()` whenever
+	// it needs a fresh `Connection`. The Client owns the user's config and
+	// threads it onto every pool factory at construction time so adapters
+	// (tarn, SingleConnection, third-party) don't need to re-derive it.
+	readonly driverOptions: DriverOptions
 	readonly hooks?: PoolHooks
 	readonly bindQueryable: BindQueryable
 	// Connection-string-parsed pool options reach the factory here, so

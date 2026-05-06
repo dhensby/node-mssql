@@ -43,3 +43,9 @@ Each ADR is a short (~1 page) record of a decision we've made and *why*, intende
 - [ADR-0015: Connection string parsing](0015-connection-strings.md)
 - [ADR-0016: Object ID format](0016-object-id-format.md)
 - [ADR-0017: Error taxonomy](0017-error-taxonomy.md)
+- [ADR-0018: Client lifecycle — `createClient`, `connect`, `close`, `destroy`](0018-client-lifecycle.md)
+- [ADR-0019: SQL type system and type tags](0019-sql-type-system.md) *(draft)*
+- [ADR-0020: Table-valued parameters](0020-table-valued-parameters.md) *(draft)*
+- [ADR-0021: Bulk insert / bulk load](0021-bulk-insert.md) *(draft)*
+- [ADR-0022: Per-Query lifecycle event surface](0022-per-query-event-surface.md) *(draft)*
+- [ADR-0023: `RequestRunner` — connection acquisition for `Query<T>`](0023-request-runner.md) *(draft)*

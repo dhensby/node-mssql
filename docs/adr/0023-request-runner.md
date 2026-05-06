@@ -100,15 +100,23 @@ The runner construction site for any given scope happens *once* (per scope insta
 - The runner abstraction is internal. There is no public `RequestRunner` factory the user constructs — they get queryables (the pool-bound `sql`, `await using conn = sql.acquire()`, etc.), and scopes wire runners under the hood.
 - A future feature that wants to interpose on the wire (a retry wrapper, an outbound-SQL rewriter, a per-request tracing layer) lands as a `RequestRunner` decorator without changing `Query<T>`.
 
+## Spike findings (V-1)
+
+Validated by a vertical-slice cut implementing the runner + a minimal `Query<T>` (`.then()` + `.all()` only) tested against a hand-rolled `FakeRunner` that simulates the pool-bound async-generator `try/finally` pattern:
+
+- The async-generator `try/finally` releases the connection on **every** consumed-stream exit path tested — natural drain (the `done` event from the runner), runner-side errors (the runner throws mid-stream), and Query-internal throws that interrupt the for-await loop (`MultipleRowsetsError` fires when a second `metadata` token arrives, and the for-await's auto-`iter.return()` propagates into the runner's `finally`). The pattern is sound.
+- `Query<T>` constructed with `{ runner, request, signal }` reads cleanly. Lazy execution is straightforward — the runner is only invoked when a terminal fires, never at construction.
+- A `FakeRunner` is a 15-line async generator yielding canned `ResultEvent[]` — zero `Pool` / `Connection` fixture surface needed to test `Query<T>` shape mapping, single-consumption, multi-rowset detection, and release-on-end.
+
 ## Open questions
 
-These are intentionally left open for the kernel implementation to resolve, then refined back into this ADR before promoting to Accepted.
+These remain for kernel-runtime work to resolve, then refined back into this ADR before promoting to Accepted.
 
-1. **Naming.** `RequestRunner` vs `RequestExecutor` vs `QueryExecutor` vs something domain-specific. Current placeholder is `RequestRunner` because it `run(...)`s a request; the spike will surface whether a clearer noun emerges.
-2. **`ping()` on the runner.** [ADR-0011](0011-pool-port.md) specifies `sql.ping()` for `onAcquire`/`onRelease` hook bodies. Does that go on the runner directly (one method alongside `run()`), or does the `Queryable` wrapper provide it via a separate `Connection.ping()` call? Pool-bound runners would need to acquire-then-ping-then-release for an out-of-stream ping, which is awkward. Likely answer: ping lives on the `Queryable` layer (which already holds a specific connection in the hook context), not on `RequestRunner` itself. Confirm during the kernel impl.
-3. **Construction signature.** `Query<T>` takes a runner at construction. Does the scope pass the runner directly, or via a builder (`new Query({ runner, request, ... })`)? The latter is more extension-friendly; the former is leaner. Spike will tell.
-4. **Per-scope signal threading.** When a `ReservedConn` exposes its own `.signal()` builder method on a query, does that signal compose with the `ReservedConn`'s own cancellation signal (if it has one), or only with the Query's controller? Touches `ReservedConn`'s scope semantics, which are defined in [ADR-0006](0006-queryable-api.md) but not yet down to signal-composition specifics. Resolve when the scope-builder runtime lands (Commit B-3 / B-4).
-5. **Multi-rowset and `iter.return()`.** [ADR-0006](0006-queryable-api.md) distinguishes inner-break (advance past current rowset) from outer-break (cancel request) for `.rowsets()`. The runner sees only the outer iterator's `return()`; the inner-rowset advance must be handled inside `Query<T>`'s `.rowsets()` implementation, draining the current rowset's remaining rows from the runner stream before yielding the next rowset. Validate this is workable when `.rowsets()` lands (Commit B-2.5).
+1. **Naming.** `RequestRunner` vs `RequestExecutor` vs `QueryExecutor` vs something domain-specific. Current name is `RequestRunner` because it `run(...)`s a request; the V-1 spike found no friction with it. Revisit only if a clearer noun emerges during the round-out commits.
+2. **`ping()` on the runner.** [ADR-0011](0011-pool-port.md) specifies `sql.ping()` for `onAcquire`/`onRelease` hook bodies. V-1 confirms ping does **not** belong on `RequestRunner` — the runner's job is `run(req, signal): AsyncIterable<ResultEvent>`, not "any operation against a connection." Ping lives on `Connection` (the driver port) and surfaces through the `Queryable` wrapper that hooks receive (which holds a specific bound connection for the hook's duration). Resolved.
+3. **Construction signature.** V-1 went with `new Query({ runner, request, signal })` (options-object). Reads cleanly, extends well to additional fields (`raw`, `id`, etc.) without churning call sites. Resolved.
+4. **Per-scope signal threading.** When a `ReservedConn` exposes its own `.signal()` builder method on a query, does that signal compose with the `ReservedConn`'s own cancellation signal (if it has one), or only with the Query's controller? Touches `ReservedConn`'s scope semantics, which are defined in [ADR-0006](0006-queryable-api.md) but not yet down to signal-composition specifics. Resolve when the scope-builder runtime lands (round-out commit R-4).
+5. **Multi-rowset and `iter.return()`.** [ADR-0006](0006-queryable-api.md) distinguishes inner-break (advance past current rowset) from outer-break (cancel request) for `.rowsets()`. The runner sees only the outer iterator's `return()`; the inner-rowset advance must be handled inside `Query<T>`'s `.rowsets()` implementation, draining the current rowset's remaining rows from the runner stream before yielding the next rowset. Validate this is workable when `.rowsets()` lands (round-out commit R-2).
 
 ## Alternatives considered
 

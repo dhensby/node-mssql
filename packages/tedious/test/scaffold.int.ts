@@ -1,22 +1,20 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { integrationConfig, SKIP_REASON } from './integration.js';
+import { requireIntegrationConfig } from './integration.js';
 
-// Sanity-check that the integration scaffold itself works:
-// - When env is unset: this test reports a skip with SKIP_REASON.
-// - When env is set: this test asserts that the config helper parsed it.
-//
-// The real end-to-end integration test (`SELECT 1` against a live server)
-// lands in Commit C alongside the tedious driver runtime.
+// Sanity-check that the env-var integration scaffold parses correctly.
+// `requireIntegrationConfig()` throws with a help message if env is unset
+// — running this test against an empty environment is a hard failure
+// (per `integration.ts` header), so "test suite passes" implies "tests
+// actually ran against a real DB."
 describe('integration scaffold', () => {
-	test('config helper parses env', { skip: integrationConfig === null ? SKIP_REASON : false }, () => {
-		const config = integrationConfig;
-		assert.notEqual(config, null);
-		if (config === null) return;
+	test('config helper parses env into IntegrationConfig', () => {
+		const config = requireIntegrationConfig();
 		assert.equal(typeof config.host, 'string');
 		assert.equal(typeof config.port, 'number');
 		assert.equal(typeof config.user, 'string');
 		assert.equal(typeof config.password, 'string');
 		assert.equal(typeof config.database, 'string');
+		assert.ok(config.password.length > 0, 'password is non-empty');
 	});
 });

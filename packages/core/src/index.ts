@@ -6,3 +6,5 @@ export * from './config/index.js';
 export * from './driver/index.js';
 export * from './pool/index.js';
 export * from './query/index.js';
+export * from './sql/index.js';
+export * from './client/index.js';

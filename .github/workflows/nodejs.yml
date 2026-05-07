@@ -87,6 +87,31 @@ jobs:
     # `--test-coverage-functions` / `--test-coverage-branches` CLI flags,
     # which were stabilised in Node 22. Test on a single recent Node version;
     # the per-Node test matrix (test-workspaces) covers compatibility.
+    #
+    # The `@tediousjs/mssql-tedious` package's `test:coverage` script runs
+    # both unit and integration tests so the driver runtime (which is only
+    # exercised end-to-end against a real server) hits the threshold. That
+    # requires a live SQL Server reachable via MSSQL_TEST_*; we spin one up
+    # here as a service container and forward the SA password through.
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'yourStrong(!)Password'
+        ports:
+          - 1433:1433
+        # Healthcheck — `docker run` waits for the container's healthcheck
+        # before the job's `steps:` start, so the test process never races
+        # with SQL Server boot. `start-period` covers the ~10–20s engine
+        # warm-up; sqlcmd at `/opt/mssql-tools18/bin/sqlcmd` is the path
+        # current `mssql/server:2022-latest` images ship.
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'yourStrong(!)Password' -Q 'SELECT 1' || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+          --health-start-period 30s
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -102,6 +127,12 @@ jobs:
       - name: Build workspaces
         run: npm run build:workspaces
       - name: Run coverage with thresholds
+        # `MSSQL_TEST_PASSWORD` matches the SA password set on the service.
+        # Other MSSQL_TEST_* vars take their defaults from
+        # `packages/tedious/test/integration.ts` (host=localhost,
+        # port=1433, user=sa, database=master).
+        env:
+          MSSQL_TEST_PASSWORD: 'yourStrong(!)Password'
         run: npm run test:coverage:workspaces
   release:
     name: Release

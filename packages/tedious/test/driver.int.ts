@@ -192,3 +192,87 @@ describe('tediousDriver — Client lifecycle (integration)', () => {
 		);
 	});
 });
+
+// ─── Round-out terminals: .iterate / .run / .result / .meta ─────────────────
+
+describe('tediousDriver — round-out terminals (integration)', () => {
+	test('for await streams rows one at a time', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const seen: number[] = [];
+			for await (const row of client.sql<{ n: number }>`
+				SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3
+			`) {
+				seen.push(row.n);
+			}
+			assert.deepEqual(seen, [1, 2, 3]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.run() drains a SELECT and reports rowsAffected', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const meta = await client.sql`
+				SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3
+			`.run();
+			assert.equal(meta.completed, true);
+			// Tedious reports rowsAffected for SELECT statements; the value
+			// reflects what the server emits in its DONE token.
+			assert.ok(meta.rowsAffected >= 0);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.result() returns rows + meta in one shape', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const { rows, meta } = await client.sql<{ n: number }>`
+				SELECT 1 AS n UNION ALL SELECT 2 AS n
+			`.result();
+			assert.deepEqual(rows, [{ n: 1 }, { n: 2 }]);
+			assert.equal(meta.completed, true);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.meta() throws before stream terminates and works after', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const q = client.sql`SELECT 1 AS n`;
+			assert.throws(() => q.meta(), TypeError);
+			await q;
+			const meta = q.meta();
+			assert.equal(meta.completed, true);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.run() is rowset-oblivious (does not throw on multi-statement)', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			// A multi-statement batch — `.run()` should drain quietly and
+			// the trailer should reflect the per-statement counts.
+			const meta = await client.sql`
+				SELECT 1 AS a;
+				SELECT 2 AS b;
+			`.run();
+			assert.equal(meta.completed, true);
+			assert.ok(
+				meta.rowsAffectedPerStatement.length >= 1,
+				'per-statement counts populated',
+			);
+		} finally {
+			await client.close();
+		}
+	});
+});

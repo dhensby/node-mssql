@@ -276,3 +276,81 @@ describe('tediousDriver — round-out terminals (integration)', () => {
 		}
 	});
 });
+
+// ─── Cancel-then-settle ordering against a real server (regression) ─────────
+//
+// The bug guarded against: cancel returning before tedious has
+// settled the cancel-ack, leading to `Connection.reset()` on a mid-
+// cancel-response connection and corrupting state for the next
+// acquire. This integration test exercises the load-bearing path:
+// cancel a long-running query, then immediately fire a new query
+// on the same client. If the connection wasn't fully settled before
+// release, the second query would observe corrupted state (or hang
+// / error in subtle ways).
+
+describe('tediousDriver — cancel-then-settle ordering (integration)', () => {
+	test('a cancelled query releases the connection cleanly; a follow-up query on the same client succeeds', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			// Long-running query — `WAITFOR DELAY '00:00:10'` parks the
+			// server-side request for 10s. We cancel it long before that.
+			const long = client.sql`WAITFOR DELAY '00:00:10'; SELECT 1 AS n`;
+
+			// Kick off iteration; cancel after a beat.
+			const consumer = (async () => {
+				try {
+					for await (const _row of long.iterate()) { /* */ }
+					return 'completed';
+				} catch (err) {
+					return (err as Error).message;
+				}
+			})();
+
+			// Yield to let the server start the WAITFOR.
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Cancel — must return only after tedious has settled the
+			// cancel-ack and the connection is back in the pool. If
+			// cancel returns prematurely, the SELECT 1 below would
+			// observe a connection still settling the previous request.
+			await long.cancel();
+			await consumer;
+
+			// Immediately fire another query — should succeed.
+			const rows = await client.sql<{ n: number }>`SELECT 1 AS n`;
+			assert.deepEqual(rows, [{ n: 1 }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('await using disposes the query and cancels in flight on scope exit', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			let scopeExited = false;
+			{
+				await using q = client.sql`WAITFOR DELAY '00:00:10'; SELECT 1 AS n`;
+
+				// Start iteration in the background; scope exit cancels.
+				const consumer = (async () => {
+					try {
+						for await (const _ of q.iterate()) { /* */ }
+					} catch { /* expected */ }
+				})();
+
+				await new Promise((r) => setTimeout(r, 50));
+				// Falling off the block cancels via Symbol.asyncDispose.
+				void consumer;
+			}
+			scopeExited = true;
+			// Connection should be back in the pool — next query succeeds.
+			const rows = await client.sql<{ n: number }>`SELECT 2 AS n`;
+			assert.deepEqual(rows, [{ n: 2 }]);
+			assert.ok(scopeExited);
+		} finally {
+			await client.close();
+		}
+	});
+});

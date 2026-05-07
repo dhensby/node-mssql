@@ -74,11 +74,19 @@ describe('Query — construction & lazy execution', () => {
 		assert.equal(log.requests[0], req);
 	});
 
-	test('runner receives the consumer-supplied AbortSignal', async () => {
+	test('runner receives a signal that propagates the consumer-supplied AbortSignal', async () => {
+		// Query composes the consumer-supplied signal with its own internal
+		// controller (ADR-0023) — so the runner sees a NEW signal that
+		// aborts when EITHER source fires. We verify behaviour rather
+		// than reference equality.
 		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
 		const ac = new AbortController();
 		await new Query({ runner, request: stmt('SELECT 1'), signal: ac.signal }).all();
-		assert.equal(log.signals[0], ac.signal);
+		const runnerSignal = log.signals[0];
+		assert.ok(runnerSignal !== undefined, 'runner received a signal');
+		assert.equal(runnerSignal.aborted, false);
+		ac.abort();
+		assert.equal(runnerSignal.aborted, true, 'consumer abort propagated to runner signal');
 	});
 });
 
@@ -593,6 +601,112 @@ describe('Query.meta() — trailer access', () => {
 	});
 });
 
+// ─── Cancel-then-settle ordering (regression for cancel-mid-stream leak) ───
+//
+// The bug guarded against: `q.cancel()` issues a driver-level cancel via
+// the internal AbortController, but the underlying runner's stream
+// (e.g. tedious's request) takes async time to settle the cancel
+// response. If `cancel()` resolves before the runner's `finally` block
+// has run, the surrounding scope (e.g. a poolRunner's `await using`
+// disposal) fires its connection release while the request is still
+// mid-cancel-response. `Connection.reset()` then runs on top of an
+// unsettled cancel, corrupting state for the next acquire.
+//
+// `cancel()` MUST await the runner stream's full termination (via the
+// stream-events generator's `finally` block) before resolving.
+
+describe('Query — cancel-then-settle ordering (regression)', () => {
+	test('q.cancel() does not resolve until the runner stream finally has run', async () => {
+		const order: string[] = [];
+		// Manual control: the runner's cancel-cleanup completes only when
+		// `triggerCleanup` is called.
+		let triggerCleanup: () => void = () => { /* set below */ };
+		const cleanupArrived = new Promise<void>((res) => {
+			triggerCleanup = res;
+		});
+
+		const runner: RequestRunner = {
+			run(_req, signal) {
+				return (async function* () {
+					try {
+						yield {
+							kind: 'metadata',
+							columns: [{ name: 'n' }],
+						} satisfies ResultEvent;
+						// Park until the consumer cancels — then simulate
+						// async cleanup before the generator throws.
+						await new Promise<never>((_resolve, reject) => {
+							signal!.addEventListener('abort', () => {
+								order.push('abort-handled');
+								void cleanupArrived.then(() => {
+									order.push('runner-cleanup-done');
+									reject(new Error('cancelled'));
+								});
+							});
+						});
+					} finally {
+						order.push('runner-finally');
+					}
+				})();
+			},
+		};
+
+		const q = new Query({ runner, request: stmt('q') });
+
+		// Start a consumer in the background — it iterates until cancel.
+		const consumerPromise = (async () => {
+			try {
+				for await (const _row of q.iterate()) {
+					/* noop */
+				}
+			} catch {
+				/* expected: cancelled */
+			}
+			order.push('consumer-done');
+		})();
+
+		// Yield enough turns for the runner to start and the consumer to
+		// be parked.
+		await new Promise((r) => setImmediate(r));
+
+		// Start the cancel — it MUST not resolve until the runner stream
+		// has fully terminated (the `runner-finally` log entry).
+		const cancelPromise = q.cancel();
+		let cancelResolved = false;
+		void cancelPromise.then(() => {
+			cancelResolved = true;
+		});
+
+		// Yield turns to let any sync/microtask resolution fire.
+		await new Promise((r) => setImmediate(r));
+
+		// At this point the runner's abort handler has fired but cleanup
+		// hasn't completed (we control `triggerCleanup`). If cancel()
+		// resolved here, it would be returning before the runner stream
+		// settled — and the surrounding poolRunner's `await using`
+		// would release the connection mid-cleanup.
+		assert.equal(order[0], 'abort-handled', 'abort handler ran');
+		assert.equal(
+			cancelResolved,
+			false,
+			'cancel() resolved before the runner stream finished cleanup — connection would be released mid-settle',
+		);
+
+		// Trigger cleanup → runner generator throws → finally fires →
+		// cancel awaits termination, then resolves.
+		triggerCleanup();
+		await cancelPromise;
+		await consumerPromise;
+
+		assert.deepEqual(order, [
+			'abort-handled',
+			'runner-cleanup-done',
+			'runner-finally',
+			'consumer-done',
+		]);
+	});
+});
+
 // ─── Trailer events: info, print, envChange, output, returnValue ────────────
 
 describe('Query — trailer event accumulation', () => {
@@ -734,5 +848,214 @@ describe('Query — trailer event accumulation', () => {
 		assert.equal(resRows.length, 1);
 		assert.equal(resMeta.info.length, 1);
 		assert.equal(resMeta.returnValue, 7);
+	});
+});
+
+// ─── Query.raw() — view toggle ──────────────────────────────────────────────
+
+describe('Query.raw() — view toggle', () => {
+	test('returns a NEW Query (does not consume the original)', async () => {
+		const { runner } = makeFakeRunner(() => [
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query<{ n: number }>({ runner, request: stmt('SELECT n') });
+		const r = q.raw<[number]>();
+		assert.notEqual(q, r, '.raw() returned a new Query');
+		// Original is still consumable.
+		const objs = await q;
+		assert.deepEqual(objs, [{ n: 1 }]);
+		// Raw view consumes its OWN round-trip — the runner is invoked twice
+		// (once for `q`, once for `r`).
+		const tups = await r;
+		assert.deepEqual(tups, [[1]]);
+	});
+
+	test('rows arrive as positional tuples in column order', async () => {
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] },
+			{ kind: 'row', values: [1, 'x', null] },
+			{ kind: 'row', values: [2, 'y', 'z'] },
+			{ kind: 'rowsetEnd', rowsAffected: 2 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT a, b, c') });
+		const rows = await q.raw<[number, string, string | null]>();
+		assert.deepEqual(rows, [[1, 'x', null], [2, 'y', 'z']]);
+	});
+
+	test('preserves duplicate-column values that the default object shape collapses', async () => {
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'id' }, { name: 'id' }] },
+			{ kind: 'row', values: [1, 2] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT a.id, b.id') });
+		const rows = await q.raw<[number, number]>();
+		assert.deepEqual(rows, [[1, 2]], 'both duplicate-named columns preserved');
+	});
+
+	test('.raw() does not invoke the runner (lazy)', () => {
+		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		q.raw();
+		assert.equal(log.calls, 0, 'raw() did not start execution');
+	});
+
+	test('.raw() can be called any number of times — each call is a fresh Query', async () => {
+		const { runner } = makeFakeRunner(() => [
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT n') });
+		const a = q.raw();
+		const b = q.raw();
+		assert.notEqual(a, b);
+		await a;
+		await b;
+	});
+
+	test('streaming via for-await on a raw Query yields tuples', async () => {
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'a' }, { name: 'b' }] },
+			{ kind: 'row', values: [1, 'x'] },
+			{ kind: 'row', values: [2, 'y'] },
+			{ kind: 'rowsetEnd', rowsAffected: 2 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT a, b') });
+		const collected: [number, string][] = [];
+		for await (const row of q.raw<[number, string]>().iterate()) {
+			collected.push(row);
+		}
+		assert.deepEqual(collected, [[1, 'x'], [2, 'y']]);
+	});
+
+	test('.run() works on a raw Query (drain-only ignores raw mode)', async () => {
+		const { runner } = makeFakeRunner([
+			{ kind: 'rowsetEnd', rowsAffected: 5 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('UPDATE t') });
+		const meta = await q.raw().run();
+		assert.equal(meta.rowsAffected, 5);
+	});
+});
+
+// ─── Query.cancel() / .dispose() — feature behaviour ────────────────────────
+
+describe('Query.cancel() / .dispose() — feature behaviour', () => {
+	test('cancel() before any terminal pre-arms the abort — first terminal call sees an aborted signal', async () => {
+		// Use a runner that honours the signal (real drivers do — e.g.
+		// tedious's `events.on` throws on aborted signal at next pull).
+		const runner: RequestRunner = {
+			run(_req, signal) {
+				return (async function* () {
+					signal?.throwIfAborted();
+					yield { kind: 'done' } satisfies ResultEvent;
+				})();
+			},
+		};
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		await q.cancel();
+		// First terminal sees the already-aborted signal and rejects.
+		await assert.rejects(() => q.all());
+	});
+
+	test('cancel() is idempotent — second call is a no-op', async () => {
+		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		await q.cancel();
+		await q.cancel();  // doesn't throw
+	});
+
+	test('dispose() cancels and marks the Query unusable', async () => {
+		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		await q.dispose();
+		assert.throws(() => q.iterate(), TypeError);
+		await assert.rejects(() => q.all(), TypeError);
+		await assert.rejects(() => q.run(), TypeError);
+	});
+
+	test('dispose() is idempotent', async () => {
+		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		await q.dispose();
+		await q.dispose();  // doesn't throw
+	});
+
+	test('await using cleans up at scope end', async () => {
+		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		let captured: Query<unknown> | null = null;
+		{
+			await using q = new Query({ runner, request: stmt('SELECT 1') });
+			captured = q;
+		}
+		// `q` has been disposed; subsequent terminals throw.
+		assert.throws(() => captured!.iterate(), TypeError);
+	});
+
+	test('cancel() mid-stream propagates AbortError to the row terminal', async () => {
+		const runner: RequestRunner = {
+			run(_req, signal) {
+				return (async function* () {
+					yield { kind: 'metadata', columns: [{ name: 'n' }] } satisfies ResultEvent;
+					await new Promise<never>((_resolve, reject) => {
+						signal!.addEventListener('abort', () => {
+							reject(new Error('aborted'));
+						});
+					});
+				})();
+			},
+		};
+		const q = new Query({ runner, request: stmt('SELECT n') });
+		const consumer = (async () => {
+			try {
+				for await (const _ of q.iterate()) { /* */ }
+				return 'completed';
+			} catch (err) {
+				return (err as Error).message;
+			}
+		})();
+		// Yield until the consumer is parked.
+		await new Promise((r) => setImmediate(r));
+		await q.cancel();
+		assert.equal(await consumer, 'aborted');
+	});
+
+	test('meta() after cancel returns completed=false with partial trailer', async () => {
+		const runner: RequestRunner = {
+			run(_req, signal) {
+				return (async function* () {
+					yield {
+						kind: 'metadata',
+						columns: [{ name: 'n' }],
+					} satisfies ResultEvent;
+					yield { kind: 'row', values: [1] } satisfies ResultEvent;
+					await new Promise<never>((_resolve, reject) => {
+						signal!.addEventListener('abort', () => {
+							reject(new Error('aborted'));
+						});
+					});
+				})();
+			},
+		};
+		const q = new Query({ runner, request: stmt('SELECT n') });
+		const consumer = (async () => {
+			try {
+				for await (const _ of q.iterate()) { /* */ }
+			} catch { /* expected */ }
+		})();
+		await new Promise((r) => setImmediate(r));
+		await q.cancel();
+		await consumer;
+		const meta = q.meta();
+		assert.equal(meta.completed, false, 'completed=false on cancel');
 	});
 });

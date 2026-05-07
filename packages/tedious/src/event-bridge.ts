@@ -26,7 +26,7 @@
  * `@tediousjs/mssql-tedious`.
  */
 
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import type { ColumnMetadata, ResultEvent } from '@tediousjs/mssql-core';
 import type { Request } from 'tedious';
 
@@ -38,6 +38,8 @@ export interface BridgeEvents {
 
 export class EventBridge extends EventEmitter<BridgeEvents> {
 	readonly #request: Request;
+	#completed = false;
+	#destroyPromise: Promise<void> | null = null;
 
 	constructor(request: Request) {
 		super();
@@ -94,9 +96,13 @@ export class EventBridge extends EventEmitter<BridgeEvents> {
 
 		// Tedious's `requestCompleted` is the natural-end signal — fires
 		// after the last `done` / `doneInProc` regardless of success or
-		// failure. Map to `'end'`; consumers of this bridge pass
-		// `close: ['end']` to `events.on()` to terminate iteration.
+		// failure (cancel-ack also drives this). Map to `'end'`; consumers
+		// of this bridge pass `close: ['end']` to `events.on()` to
+		// terminate iteration. The `#completed` flag lets `destroy()`
+		// short-circuit if the request already settled before destroy
+		// was called.
 		request.on('requestCompleted', () => {
+			this.#completed = true;
 			this.emit('end');
 		});
 	}
@@ -112,19 +118,36 @@ export class EventBridge extends EventEmitter<BridgeEvents> {
 		this.#request.resume();
 	}
 
-	// Cancel the in-flight request and detach our listeners. Called on
-	// every abnormal exit from the iterator (consumer break,
-	// signal abort) by the wrapper generator in `connection.ts`.
-	// Tedious's `cancel()` is a no-op when no request is in-flight,
-	// so calling after natural completion is safe.
-	destroy(): void {
-		this.#request.cancel();
-		this.#request.removeAllListeners();
-		// Noop `error` listener so any post-cancel error tedious emits
-		// asynchronously (e.g. as the cancel response arrives) doesn't
-		// crash the process via the Request's own EventEmitter — same
-		// "no listeners on `'error'` throws" hazard, just on the Request
-		// side rather than the Bridge side.
-		this.#request.on('error', () => { /* swallow post-cancel errors */ });
+	// Cancel the in-flight request and detach our listeners.
+	//
+	// Awaits tedious's `requestCompleted` settlement before resolving —
+	// this is load-bearing. The poolRunner's `await using pooled`
+	// disposal fires only after this Promise resolves, so the connection
+	// only returns to the pool once the cancel-ack has arrived. Without
+	// this wait, `Connection.reset()` runs on top of an in-flight cancel
+	// response and corrupts the connection for the next acquire.
+	//
+	// Idempotent — repeat calls return the stored Promise. Already-
+	// settled fast path (`#completed === true`) skips the wait.
+	destroy(): Promise<void> {
+		if (this.#destroyPromise !== null) return this.#destroyPromise;
+		this.#destroyPromise = (async () => {
+			if (!this.#completed) {
+				this.#request.cancel();
+				// Wait for tedious to emit `requestCompleted` (which fires
+				// `'end'` via the constructor's listener). Synchronous
+				// registration of `once()` after the `#completed` check
+				// closes the race window where the event could fire between
+				// the check and the listener attaching.
+				await once(this, 'end');
+			}
+			this.#request.removeAllListeners();
+			// Noop `error` listener — covers the (rare) case where tedious
+			// emits a post-`requestCompleted` `error` on the Request,
+			// which would otherwise crash the process via the Request's
+			// own EventEmitter (`emit('error')` with no listeners throws).
+			this.#request.on('error', () => { /* swallow post-cancel errors */ });
+		})();
+		return this.#destroyPromise;
 	}
 }

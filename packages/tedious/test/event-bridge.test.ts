@@ -21,7 +21,17 @@ class FakeRequest extends EventEmitter {
 
 	pause(): void { this.paused++; }
 	resume(): void { this.resumed++; }
-	cancel(): void { this.cancelled++; }
+
+	// Mirror tedious: cancel() initiates a cancel attention; the server
+	// responds asynchronously and tedious emits requestCompleted on the
+	// Request. Tests that need to control timing override this method;
+	// the default below uses `queueMicrotask` so the cancel-ack lands
+	// "next tick" — fast enough for synchronous-looking tests but still
+	// async (matching real tedious behaviour).
+	cancel(): void {
+		this.cancelled++;
+		queueMicrotask(() => this.emit('requestCompleted'));
+	}
 
 	override removeAllListeners(): this {
 		this.listenersRemoved++;
@@ -214,26 +224,106 @@ describe('EventBridge — backpressure', () => {
 	});
 });
 
-// ─── Cancellation ──────────────────────────────────────────────────────────
+// ─── Cancel-then-release ordering (regression for cancel-mid-response leak) ──
+//
+// The bug guarded against here: tedious's `request.cancel()` initiates a
+// cancel attention to the server but doesn't wait for the cancel-ack. If
+// `bridge.destroy()` returns before the ack arrives, the surrounding
+// poolRunner's `await using pooled` releases the connection back to the
+// pool while tedious is still mid-cancel-response. The pool's
+// `Connection.reset()` then runs on top of an unsettled cancel, leaving
+// the connection in a state the next acquire can't safely use.
+//
+// `destroy()` MUST await `'requestCompleted'` (which the bridge surfaces
+// as `'end'`) before resolving, so the connection only returns to the
+// pool once tedious has fully settled the request.
+
+describe('EventBridge — cancel-then-settle ordering (regression)', () => {
+	test('destroy() does not resolve until requestCompleted has fired on the underlying Request', async () => {
+		const { bridge, request } = buildBridge();
+
+		// Replace cancel() with a controllable simulator: the cancel-ack
+		// arrives only when we call `triggerAck()`, mirroring tedious's
+		// real behaviour where the response is a server round-trip.
+		let triggerAck: () => void = () => { /* set by ackArrived */ };
+		const ackArrived = new Promise<void>((resolve) => { triggerAck = resolve; });
+		request.cancel = function() {
+			this.cancelled++;
+			void ackArrived.then(() => this.emit('requestCompleted'));
+		};
+
+		// Track resolution state on the destroy promise without awaiting
+		// yet. `Promise.resolve(value)` passes Promises through unchanged
+		// and wraps non-Promises — works for both the buggy sync `destroy()`
+		// (returns void) and the fixed async one.
+		const destroyPromise = Promise.resolve(bridge.destroy());
+		let destroyResolved = false;
+		void destroyPromise.then(() => { destroyResolved = true; });
+
+		// Yield enough to let any synchronous / microtask resolution land.
+		// `setImmediate` runs after all queued microtasks for this turn
+		// (and after any setTimeout(0) that's already been queued).
+		await new Promise((r) => setImmediate(r));
+
+		// Without the await-settle fix, destroy returned synchronously
+		// (it just initiated cancel + removed listeners), so destroyResolved
+		// is already true at this point. With the fix, destroy is parked
+		// awaiting `'end'` which fires from requestCompleted — and we
+		// haven't triggered the ack yet, so destroy is still pending.
+		assert.equal(
+			destroyResolved,
+			false,
+			'destroy() resolved before requestCompleted fired — pool would release a connection mid-cancel-response',
+		);
+
+		// Trigger the cancel-ack. After the fix, this lets destroy resolve.
+		triggerAck();
+		await destroyPromise;
+	});
+
+	test('destroy() returns immediately when requestCompleted has already fired (no hang on the no-cancel-needed path)', async () => {
+		const { bridge, request } = buildBridge();
+		// Stream completed naturally before destroy is called.
+		request.fireDone(0);
+		request.fireRequestCompleted();
+		// Should resolve without needing another `requestCompleted`.
+		await Promise.race([
+			Promise.resolve(bridge.destroy()),
+			new Promise((_, reject) => setTimeout(() => reject(new Error('hung')), 100)),
+		]);
+	});
+});
 
 describe('EventBridge — destroy', () => {
-	test('destroy() cancels the underlying request and removes its listeners', () => {
+	test('destroy() cancels the underlying request and removes its listeners', async () => {
 		const { bridge, request } = buildBridge();
-		bridge.destroy();
+		// FakeRequest's default `cancel()` simulates tedious by firing
+		// `requestCompleted` on the next microtask, so destroy resolves
+		// without manual orchestration.
+		await bridge.destroy();
 		assert.equal(request.cancelled, 1);
 		assert.equal(request.listenersRemoved, 1);
 	});
 
-	test('destroy() is safe to call after natural completion (cancel is a no-op)', async () => {
+	test('destroy() is safe to call after natural completion (skips the cancel-then-await fast path)', async () => {
 		const { bridge, request } = buildBridge();
 		const iter = on(bridge, 'data', { close: ['end'] }) as AsyncIterableIterator<[ResultEvent]>;
 		request.fireDone(0);
 		request.fireRequestCompleted();
 		await collect(iter);
-		bridge.destroy();
-		// FakeRequest counts every cancel call; tedious treats post-completion
-		// cancel as a no-op. We just verify the call doesn't throw.
-		assert.equal(request.cancelled, 1);
+		await bridge.destroy();
+		// Already-completed path: cancel is NOT called because the request
+		// has already settled. Listener cleanup still runs.
+		assert.equal(request.cancelled, 0, 'cancel skipped on already-completed path');
+		assert.equal(request.listenersRemoved, 1);
+	});
+
+	test('destroy() is idempotent — repeat calls return the same Promise', async () => {
+		const { bridge } = buildBridge();
+		const a = bridge.destroy();
+		const b = bridge.destroy();
+		assert.equal(a, b, 'second destroy() returned the stored promise');
+		await a;
 	});
 });
 
@@ -265,12 +355,12 @@ describe('EventBridge — crash-safety on post-cleanup error emits', () => {
 		});
 	});
 
-	test('destroy() leaves a noop `error` listener on the Request — post-cancel errors from tedious do not crash', () => {
-		// Repro the post-destroy window: after destroy(), the Request's
-		// listeners are removed. Tedious might still fire `error`
-		// asynchronously as the cancel response arrives.
+	test('destroy() leaves a noop `error` listener on the Request — post-cancel errors from tedious do not crash', async () => {
+		// Repro the post-destroy window: after destroy() resolves, the
+		// Request's listeners are removed and the noop `error` listener
+		// is in place. Tedious might still fire `error` asynchronously.
 		const { bridge, request } = buildBridge();
-		bridge.destroy();
+		await bridge.destroy();
 		// Without the noop listener that destroy() re-attaches, this
 		// fireError would crash because the Request has no `error`
 		// listeners.

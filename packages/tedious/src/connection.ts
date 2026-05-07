@@ -102,7 +102,13 @@ export class TediousConnectionWrapper
 					yield event;
 				}
 			} finally {
-				bridge.destroy();
+				// `await` is load-bearing: `bridge.destroy()` waits for tedious's
+				// cancel-ack (`requestCompleted`) before resolving. Without
+				// this await the surrounding poolRunner's `await using pooled`
+				// would fire its disposal — and `Connection.reset()` — while
+				// tedious is still mid-cancel-response, corrupting the
+				// connection state for the next acquire.
+				await bridge.destroy();
 			}
 		})();
 	}

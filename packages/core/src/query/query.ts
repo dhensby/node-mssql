@@ -39,6 +39,9 @@ export interface QueryOptions {
 	readonly runner: RequestRunner
 	readonly request: ExecuteRequest
 	readonly signal?: AbortSignal
+	// View-toggle flag set by `.raw()`. Internal — users access this
+	// path via `query.raw()`, never directly.
+	readonly rawMode?: boolean
 }
 
 // Internal mutable trailer accumulator. Public `QueryMeta` is the
@@ -76,6 +79,9 @@ const snapshotMeta = <O>(t: MutableTrailer): QueryMeta<O> =>
 const ALREADY_CONSUMED =
 	'Query already consumed. Each Query<T> is single-consumption; build a new Query (call the tag again) to re-run.';
 
+const DISPOSED =
+	'Query has been disposed. Calling a terminal on a disposed Query is not allowed (ADR-0008).';
+
 const META_BEFORE_TERMINATION =
 	'Query.meta() called before the stream terminated. ' +
 	'Await a row-consuming terminal (`.all()` / `.iterate()` / `.run()` / `.result()`) first; ' +
@@ -87,19 +93,46 @@ const ROW_BEFORE_METADATA =
 const MULTIPLE_ROWSETS =
 	'query produced multiple rowsets; use .rowsets() to consume them';
 
-export class Query<T = unknown> implements PromiseLike<T[]>, AsyncIterable<T> {
+export class Query<T = unknown> implements
+	PromiseLike<T[]>,
+	AsyncIterable<T>,
+	AsyncDisposable
+{
 	readonly #runner: RequestRunner;
 	readonly #request: ExecuteRequest;
 	readonly #signal: AbortSignal | undefined;
+	readonly #rawMode: boolean;
 
 	#consumed = false;
 	#terminated = false;
+	#disposed = false;
 	readonly #trailer: MutableTrailer = createTrailer();
+
+	// Internal controller for `.cancel()` / `.dispose()` to abort the
+	// in-flight runner stream. Lazily allocated — Queries that never
+	// fire a terminal don't pay for an `AbortController` they'll never
+	// use.
+	#ownAbortController: AbortController | null = null;
+	// Cached composite signal — the union of `this.#signal` (consumer-
+	// supplied) and the own controller's signal. Built on first
+	// `#composedSignal()` call.
+	#compositeSignal: AbortSignal | undefined;
+
+	// Resolves when `#streamEvents` fully terminates (its `finally`
+	// fires). `cancel()` and `dispose()` await this so they don't
+	// resolve until the runner stream has settled — load-bearing for
+	// the connection-release ordering: the surrounding poolRunner's
+	// `await using pooled` disposal must not fire until tedious has
+	// settled the cancel response, otherwise `Connection.reset()` runs
+	// on top of an unsettled cancel.
+	#terminationPromise: Promise<void> | null = null;
+	#terminationResolve: (() => void) | null = null;
 
 	constructor(options: QueryOptions) {
 		this.#runner = options.runner;
 		this.#request = options.request;
 		this.#signal = options.signal;
+		this.#rawMode = options.rawMode ?? false;
 	}
 
 	// ─── PromiseLike ──────────────────────────────────────────────────────
@@ -196,6 +229,34 @@ export class Query<T = unknown> implements PromiseLike<T[]>, AsyncIterable<T> {
 		return { rows, meta: snapshotMeta<O>(this.#trailer) };
 	}
 
+	// ─── View toggle (non-consuming) ─────────────────────────────────────
+
+	/**
+	 * View toggle to a positional-tuple row shape (ADR-0007).
+	 *
+	 * Returns a NEW `Query<R>` whose row-consuming terminals yield rows
+	 * as `R` (a positional tuple) instead of objects. Each value lands
+	 * at the index reported by `.columns()`, preserving duplicate column
+	 * values that the default object shape collapses last-wins.
+	 *
+	 * `.raw()` does NOT consume the original Query — it's a builder, not
+	 * a terminal (per ADR-0007 / ADR-0006). Each call returns a fresh
+	 * `Query`, and execution starts only when a terminal fires on the
+	 * returned Query (lazy). The original Query remains independently
+	 * consumable; calling its terminals runs a separate round-trip.
+	 *
+	 * Tuple element type defaults to `unknown[]`; callers narrow with a
+	 * tuple type argument: `q.raw<[number, string]>()`.
+	 */
+	raw<R = unknown[]>(): Query<R> {
+		return new Query<R>({
+			runner: this.#runner,
+			request: this.#request,
+			...(this.#signal !== undefined ? { signal: this.#signal } : {}),
+			rawMode: true,
+		});
+	}
+
 	// ─── Trailer access (non-consuming) ──────────────────────────────────
 
 	/**
@@ -216,13 +277,78 @@ export class Query<T = unknown> implements PromiseLike<T[]>, AsyncIterable<T> {
 		return snapshotMeta<O>(this.#trailer);
 	}
 
+	// ─── Cancellation & disposal ─────────────────────────────────────────
+
+	/**
+	 * Issue a driver-level cancel for the in-flight stream (or pre-arm
+	 * the cancellation if no terminal has fired yet — the next terminal
+	 * call sees an already-aborted signal and rejects).
+	 *
+	 * Same effect as `.dispose()` on an in-flight stream — both abort
+	 * the underlying runner via `AbortSignal`. Differs in that
+	 * `.cancel()` doesn't mark the Query as disposed: subsequent
+	 * `.meta()` calls return the partial trailer (with `completed: false`),
+	 * and `.cancel()` is idempotent (repeat calls no-op).
+	 */
+	async cancel(): Promise<void> {
+		if (this.#ownAbortController === null) {
+			this.#ownAbortController = new AbortController();
+		}
+		if (!this.#ownAbortController.signal.aborted) {
+			this.#ownAbortController.abort();
+		}
+		// Await full runner-stream termination if a stream is in flight.
+		// This is load-bearing — without the wait, the surrounding
+		// poolRunner's `await using pooled` disposal would fire while
+		// the runner is still settling (e.g. tedious mid-cancel-response),
+		// and `Connection.reset()` would corrupt the connection for the
+		// next acquire. See ADR-0023's cancel-then-settle ordering.
+		if (this.#terminationPromise !== null && !this.#terminated) {
+			await this.#terminationPromise;
+		}
+	}
+
+	/**
+	 * `await using` resource cleanup — cancels any in-flight stream and
+	 * marks the Query as disposed. Subsequent terminal calls throw
+	 * `TypeError`.
+	 *
+	 * Idempotent — repeat calls return immediately.
+	 */
+	async dispose(): Promise<void> {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		await this.cancel();
+	}
+
+	async [Symbol.asyncDispose](): Promise<void> {
+		await this.dispose();
+	}
+
 	// ─── Internal: shared stream consumption + trailer accumulation ──────
 
 	#claimConsumption(): void {
+		if (this.#disposed) {
+			throw new TypeError(DISPOSED);
+		}
 		if (this.#consumed) {
 			throw new TypeError(ALREADY_CONSUMED);
 		}
 		this.#consumed = true;
+	}
+
+	// Composite signal for the runner — union of the consumer-supplied
+	// signal and our own controller. Either source firing aborts the
+	// runner. Lazily built on first stream start.
+	#composedSignal(): AbortSignal | undefined {
+		if (this.#compositeSignal !== undefined) return this.#compositeSignal;
+		if (this.#ownAbortController === null) {
+			this.#ownAbortController = new AbortController();
+		}
+		this.#compositeSignal = this.#signal !== undefined
+			? AbortSignal.any([this.#signal, this.#ownAbortController.signal])
+			: this.#ownAbortController.signal;
+		return this.#compositeSignal;
 	}
 
 	// Driver-stream consumer. Updates the trailer for every event and
@@ -231,14 +357,22 @@ export class Query<T = unknown> implements PromiseLike<T[]>, AsyncIterable<T> {
 	// stream as terminated for `.meta()` access. `#completed` is set
 	// only on natural drain.
 	async *#streamEvents(): AsyncIterable<ResultEvent> {
+		// Set up termination promise on first stream start. `cancel()` /
+		// `dispose()` await this so a cancel returns only after the
+		// runner has fully unwound — including the runner's own
+		// cleanup work (`bridge.destroy()` for tedious, etc).
+		this.#terminationPromise = new Promise<void>((res) => {
+			this.#terminationResolve = res;
+		});
 		try {
-			for await (const event of this.#runner.run(this.#request, this.#signal)) {
+			for await (const event of this.#runner.run(this.#request, this.#composedSignal())) {
 				this.#updateTrailer(event);
 				yield event;
 			}
 			this.#trailer.completed = true;
 		} finally {
 			this.#terminated = true;
+			this.#terminationResolve?.();
 		}
 	}
 
@@ -260,7 +394,13 @@ export class Query<T = unknown> implements PromiseLike<T[]>, AsyncIterable<T> {
 					if (columns === null) {
 						throw new Error(ROW_BEFORE_METADATA);
 					}
-					yield shapeRow<T>(event.values, columns);
+					// `.raw()` mode: yield the values tuple verbatim, preserving
+					// duplicate-column values by index. Default mode: shape into
+					// an object keyed by column name, last-wins on duplicates
+					// (ADR-0007).
+					yield this.#rawMode
+						? (event.values as T)
+						: shapeRow<T>(event.values, columns);
 					break;
 				case 'rowsetEnd':
 					firstRowsetEnded = true;

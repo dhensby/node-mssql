@@ -86,6 +86,19 @@ const baseConfig = {
 	transport: { host: 'db.local' },
 };
 
+// Resolve `true` if `p` is still pending after a flush of the microtask
+// queue, `false` if it has settled. Deterministic — no timers. The pool's
+// drain promise resolves via the slot-release microtask chain, never a
+// timer, so flushing the microtask queue is enough to tell pending from
+// settled. Used to assert `close()` stays pending while a connection is
+// held without racing a wall-clock delay.
+async function stillPending(p: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	void p.then(() => { settled = true; }, () => { settled = true; });
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	return !settled;
+}
+
 // ─── Construction ───────────────────────────────────────────────────────────
 
 describe('Client — construction', () => {
@@ -280,6 +293,116 @@ describe('Client.destroy()', () => {
 		const destroyPromise = client.destroy();
 
 		await Promise.all([closePromise, destroyPromise]);
+		assert.equal(client.state, 'destroyed');
+	});
+});
+
+// ─── close() / destroy() with a held ReservedConn (sql.acquire interaction) ──
+//
+// `sql.acquire()` (R-5) pins the pool's connection for the lifetime of a
+// `ReservedConn`. `client.close()` is a graceful drain (`pool.drain()`),
+// so it must NOT resolve while a holder still owns the connection — it
+// waits for `ReservedConn.release()`. `client.destroy()` is the force-
+// close escape hatch and does NOT wait. New acquires during the drain
+// window reject. These compose the Client's real `SingleConnectionPool`
+// (not a fake) so the drain-waits-for-release semantics are exercised
+// end-to-end.
+
+describe('Client — close() / destroy() with a held ReservedConn', () => {
+	test('close() stays pending while a ReservedConn is held, and resolves once it is released', async () => {
+		const { driver } = buildFakeDriver();
+		const client = createClient({ driver, ...baseConfig });
+		await client.connect();
+
+		const conn = await client.sql.acquire();
+
+		// Graceful close begins draining but must not complete while the
+		// ReservedConn owns the connection.
+		const closePromise = client.close();
+		assert.equal(client.state, 'draining', 'close() entered draining');
+		assert.equal(
+			await stillPending(closePromise),
+			true,
+			'close() pending while ReservedConn held',
+		);
+
+		// Release the holder — drain now completes and close() resolves.
+		await conn.release();
+		await closePromise;
+		assert.equal(client.state, 'destroyed');
+	});
+
+	test('destroy() force-closes even while a ReservedConn is held (does not wait)', async () => {
+		const { driver, lastConn } = buildFakeDriver();
+		const client = createClient({ driver, ...baseConfig });
+		await client.connect();
+
+		const conn = await client.sql.acquire();
+
+		// Force-close resolves WITHOUT waiting for release.
+		await client.destroy();
+		assert.equal(client.state, 'destroyed');
+		assert.equal(lastConn()?.log.closes, 1, 'held connection was force-closed');
+
+		// Releasing the (now-defunct) ReservedConn afterwards is a safe
+		// no-op — the pool is destroyed, so release short-circuits.
+		await conn.release();
+		assert.equal(lastConn()?.log.closes, 1, 'no double close on late release');
+	});
+
+	test('sql.acquire() while draining rejects with ClientClosedError', async () => {
+		const { driver } = buildFakeDriver();
+		const client = createClient({ driver, ...baseConfig });
+		await client.connect();
+
+		// Hold one ReservedConn so close() parks in draining.
+		const held = await client.sql.acquire();
+		const closePromise = client.close();
+		assert.equal(client.state, 'draining');
+
+		// A new acquire during the drain window rejects fast.
+		await assert.rejects(
+			async () => { await client.sql.acquire(); },
+			(err: unknown) => {
+				assert.ok(err instanceof ClientClosedError);
+				assert.equal(err.state, 'draining');
+				return true;
+			},
+		);
+
+		// Cleanup — release lets the drain finish.
+		await held.release();
+		await closePromise;
+	});
+
+	test('a held ReservedConn keeps running queries while the client is draining', async () => {
+		const { driver } = buildFakeDriver(() => {
+			const conn = new FakeConnection();
+			conn.scriptResponse(() => [
+				{ kind: 'metadata', columns: [{ name: 'n' }] },
+				{ kind: 'row', values: [1] },
+				{ kind: 'rowsetEnd', rowsAffected: 1 },
+				{ kind: 'done' },
+			]);
+			return conn;
+		});
+		const client = createClient({ driver, ...baseConfig });
+		await client.connect();
+
+		const conn = await client.sql.acquire();
+		const closePromise = client.close();
+		assert.equal(client.state, 'draining');
+
+		// The held connection runs its query directly (pinned runner, not
+		// gated by the Client state) — graceful drain lets in-flight
+		// holders finish their work.
+		const rows = await conn<{ n: number }>`SELECT 1 AS n`;
+		assert.deepEqual(rows, [{ n: 1 }]);
+
+		// Still pending until the holder releases.
+		assert.equal(await stillPending(closePromise), true);
+		await conn.release();
+		await closePromise;
 		assert.equal(client.state, 'destroyed');
 	});
 });

@@ -33,6 +33,7 @@
 import type { ColumnMetadata, ExecuteRequest, ResultEvent } from '../driver/index.js';
 import { MultipleRowsetsError } from '../errors/index.js';
 import type { EnvChange, InfoMessage, QueryMeta } from './meta.js';
+import { Rowsets } from './rowsets.js';
 import type { RequestRunner } from './runner.js';
 
 export interface QueryOptions {
@@ -256,6 +257,47 @@ export class Query<T = unknown> implements
 			rows.push(row);
 		}
 		return { rows, meta: snapshotMeta<O>(this.#trailer) };
+	}
+
+	// ─── Multi-rowset terminal ───────────────────────────────────────────
+
+	/**
+	 * Multi-rowset terminal — returns a {@link Rowsets} that is BOTH
+	 * thenable and async-iterable (ADR-0006). The user picks consumption
+	 * mode by how they consume it:
+	 *
+	 * ```ts
+	 * // Buffered (awaited): tuple of arrays
+	 * const [users, orders] = await q.rowsets<[User, Order]>()
+	 *
+	 * // Streamed (iterated): nested AsyncIterable per rowset
+	 * for await (const rowset of q.rowsets<[User, Order]>()) {
+	 *   for await (const row of rowset) { ... }
+	 * }
+	 * ```
+	 *
+	 * The returned `Rowsets` is itself single-consumption: pick await OR
+	 * for-await on a given `Rowsets`, not both. Calling `.rowsets()`
+	 * consumes this `Query<T>` (matching the other row-consuming
+	 * terminals) — call the tag again to re-run the SQL.
+	 *
+	 * Trailer accumulation runs on the underlying stream regardless of
+	 * which form is consumed; `.meta()` reflects per-rowset
+	 * `rowsAffected` after termination just as it would for `.run()`.
+	 *
+	 * `.raw()` mode is honoured: the awaited form returns
+	 * `RowsetsAwaited<Tuple>` of positional tuples; the streamed inner
+	 * yields the same.
+	 *
+	 * Break semantics on the streamed form:
+	 * - **Inner break.** Drains the remaining rows of the current
+	 *   rowset, then yields the next rowset. The request continues.
+	 * - **Outer break.** Cancels the underlying request via the runner
+	 *   stream's `iter.return()` chain.
+	 */
+	rowsets<Tuple extends readonly unknown[] = readonly unknown[]>(): Rowsets<Tuple> {
+		this.#claimConsumption();
+		return new Rowsets<Tuple>(this.#streamEvents(), this.#rawMode);
 	}
 
 	// ─── View toggle (non-consuming) ─────────────────────────────────────

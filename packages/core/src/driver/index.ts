@@ -17,6 +17,7 @@ export type {
 } from './result-event.js';
 export type {
 	ExecuteRequest,
+	IsolationLevel,
 	ParamBinding,
 	TxOptions,
 	PrepareRequest,

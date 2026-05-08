@@ -575,6 +575,233 @@ describe('tediousDriver — sql.acquire (integration)', () => {
 	});
 });
 
+// ─── sql.transaction — server-side transactions (integration) ────────────
+//
+// End-to-end validation of the BEGIN / COMMIT / ROLLBACK pipeline
+// against a real server, plus the savepoint set. Acceptance test —
+// rollback-discards / commit-persists is verified through a single
+// connection so the visibility contract is unambiguous.
+
+describe('tediousDriver — sql.transaction (integration)', () => {
+	// All tx tests use a #temp table to scope changes to the test's
+	// session; the table goes away when the connection releases. No
+	// shared-state cleanup needed, no database-permission impact.
+
+	test('commit persists changes within the transaction scope', async () => {
+		// `sql.transaction()` opens a tx on a FRESH pool connection, so
+		// the visible-after-commit assertion has to use a server-scoped
+		// table that survives the connection release. A `##global temp`
+		// works (visible to all sessions until the creating session
+		// ends — but in this test we use a unique name and tear down
+		// manually). Acceptance: row inserted inside the tx is visible
+		// AFTER the tx commits, on a separate (pool-bound) query.
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const tableName = `dbo.t_${Math.random().toString(36).slice(2, 10)}`;
+			await client.sql.unsafe(
+				`CREATE TABLE ${tableName} (id INT)`,
+			).run();
+			try {
+				const tx = await client.sql.transaction();
+				try {
+					await tx.unsafe(`INSERT INTO ${tableName} (id) VALUES (1)`).run();
+					await tx.commit();
+				} catch (err) {
+					await tx.rollback();
+					throw err;
+				}
+				const rows = await client.sql.unsafe<{ id: number }>(
+					`SELECT id FROM ${tableName}`,
+				);
+				assert.deepEqual(rows, [{ id: 1 }], 'commit persisted the insert');
+			} finally {
+				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
+			}
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('rollback discards changes within the transaction scope', async () => {
+		// `sql.transaction()` opens a tx on a NEW connection from the
+		// pool — so the #temp table created inside the tx is on that
+		// connection. After rollback, the connection releases (and
+		// resets), discarding both the tx changes AND the temp table.
+		// That makes a tx + #temp visibility test against `sql.transaction()`
+		// awkward to express. Use a permanent table for this test, scoped
+		// to a unique GUID-named ##global temp.
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const tableName = `dbo.t_${Math.random().toString(36).slice(2, 10)}`;
+			// Set up a global temp table that's visible across connections.
+			await client.sql.unsafe(
+				`CREATE TABLE ${tableName} (id INT)`,
+			).run();
+			try {
+				const tx = await client.sql.transaction();
+				try {
+					await tx.unsafe(`INSERT INTO ${tableName} (id) VALUES (1)`).run();
+					await tx.rollback();
+				} catch {
+					await tx.rollback();
+					throw new Error('tx unexpectedly threw');
+				}
+				const rows = await client.sql.unsafe<{ id: number }>(
+					`SELECT id FROM ${tableName}`,
+				);
+				assert.deepEqual(rows, [], 'rollback discarded the insert');
+			} finally {
+				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
+			}
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('await using disposes a transaction (rollback default)', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const tableName = `dbo.t_${Math.random().toString(36).slice(2, 10)}`;
+			await client.sql.unsafe(
+				`CREATE TABLE ${tableName} (id INT)`,
+			).run();
+			try {
+				{
+					await using tx = await client.sql.transaction();
+					await tx.unsafe(`INSERT INTO ${tableName} (id) VALUES (1)`).run();
+					// fall off scope without commit — rollback fires
+				}
+				const rows = await client.sql.unsafe<{ id: number }>(
+					`SELECT id FROM ${tableName}`,
+				);
+				assert.deepEqual(rows, [], 'dispose-without-commit rolled back');
+			} finally {
+				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
+			}
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('explicit isolation level reaches the server', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const tx = await client.sql.transaction().isolationLevel('serializable');
+			try {
+				// `DBCC USEROPTIONS` reports the current session's
+				// transaction isolation level.
+				interface Row { 'Set Option': string; Value: string }
+				const rows = await tx<Row>`DBCC USEROPTIONS`;
+				const row = rows.find(
+					(r) => r['Set Option'].toLowerCase() === 'isolation level',
+				);
+				assert.ok(row !== undefined, 'isolation level reported');
+				assert.equal(row?.Value.toLowerCase(), 'serializable');
+			} finally {
+				await tx.rollback();
+			}
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('Promise.all on a transaction serialises FIFO (no EREQINPROG)', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			await using tx = await client.sql.transaction();
+			const [a, b, c] = await Promise.all([
+				tx<{ n: number }>`SELECT 1 AS n`,
+				tx<{ n: number }>`SELECT 2 AS n`,
+				tx<{ n: number }>`SELECT 3 AS n`,
+			]);
+			assert.deepEqual(a, [{ n: 1 }]);
+			assert.deepEqual(b, [{ n: 2 }]);
+			assert.deepEqual(c, [{ n: 3 }]);
+			await tx.commit();
+		} finally {
+			await client.close();
+		}
+	});
+});
+
+// ─── tx.savepoint — savepoint scope (integration) ─────────────────────────
+
+describe('tediousDriver — tx.savepoint (integration)', () => {
+	test('savepoint rollback discards work since the savepoint; outer commit persists rest', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const tableName = `dbo.t_${Math.random().toString(36).slice(2, 10)}`;
+			await client.sql.unsafe(
+				`CREATE TABLE ${tableName} (id INT)`,
+			).run();
+			try {
+				const tx = await client.sql.transaction();
+				try {
+					await tx.unsafe(`INSERT INTO ${tableName} (id) VALUES (1)`).run();
+					{
+						await using sp = await tx.savepoint();
+						await sp.unsafe(`INSERT INTO ${tableName} (id) VALUES (2)`).run();
+						// fall off without release → rollback to savepoint
+						void sp;
+					}
+					await tx.unsafe(`INSERT INTO ${tableName} (id) VALUES (3)`).run();
+					await tx.commit();
+				} catch (err) {
+					await tx.rollback();
+					throw err;
+				}
+				// Outer commit persisted ids 1 and 3; savepoint rollback
+				// discarded id 2.
+				const rows = await client.sql.unsafe<{ id: number }>(
+					`SELECT id FROM ${tableName} ORDER BY id`,
+				);
+				assert.deepEqual(rows, [{ id: 1 }, { id: 3 }]);
+			} finally {
+				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
+			}
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('savepoint release leaves work intact for the outer commit', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const tableName = `dbo.t_${Math.random().toString(36).slice(2, 10)}`;
+			await client.sql.unsafe(
+				`CREATE TABLE ${tableName} (id INT)`,
+			).run();
+			try {
+				const tx = await client.sql.transaction();
+				try {
+					const sp = await tx.savepoint();
+					await sp.unsafe(`INSERT INTO ${tableName} (id) VALUES (10)`).run();
+					await sp.release();
+					await tx.commit();
+				} catch (err) {
+					await tx.rollback();
+					throw err;
+				}
+				const rows = await client.sql.unsafe<{ id: number }>(
+					`SELECT id FROM ${tableName}`,
+				);
+				assert.deepEqual(rows, [{ id: 10 }]);
+			} finally {
+				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
+			}
+		} finally {
+			await client.close();
+		}
+	});
+});
+
 // ─── .rowsets() — multi-rowset terminal (integration) ─────────────────────
 //
 // End-to-end validation of the `Rowsets<Tuple>` two-form contract

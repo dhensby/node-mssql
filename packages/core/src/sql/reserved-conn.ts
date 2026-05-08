@@ -147,8 +147,12 @@ export function makeReservedConn(pooled: PooledConnection): ReservedConn {
  * A failing previous request does NOT abort subsequent ones — the chain
  * `await prev.catch(swallow)` waits for settlement (success OR failure)
  * and lets the next call proceed cleanly.
+ *
+ * Exported (rather than file-private) so the transaction / savepoint
+ * scopes — which also pin one connection for their duration — share
+ * the same FIFO machinery rather than re-implementing it.
  */
-function pinnedRunner(connection: Connection): RequestRunner {
+export function pinnedRunner(connection: Connection): RequestRunner {
 	let lastSettled: Promise<void> = Promise.resolve();
 	const swallow = (): void => { /* deliberate: prior errors don't poison the queue */ };
 

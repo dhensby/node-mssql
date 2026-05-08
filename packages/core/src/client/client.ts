@@ -71,7 +71,11 @@ export class Client {
 			...(config.hooks !== undefined ? { hooks: config.hooks } : {}),
 			bindQueryable: stubBindQueryable,
 		});
-		this.sql = makePoolBoundSqlTag(this.#runner(), this.#acquire());
+		this.sql = makePoolBoundSqlTag(
+			this.#runner(),
+			this.#acquire(),
+			config.defaultIsolationLevel,
+		);
 	}
 
 	get state(): ClientState {

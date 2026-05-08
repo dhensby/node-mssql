@@ -1,16 +1,16 @@
 // Stub-method tests for `TediousConnectionWrapper`.
 //
-// V-3 ships only `execute` / `close` / `reset` / `ping` from the
-// `Connection` driver-port surface. The remaining methods —
-// transactions, prepared statements, bulk-load — throw
-// "not yet implemented" so users hitting them get a clear pointer to
-// the round-out commits, not a silent no-op or a confusing tedious
-// error. These tests pin that contract so a future round-out commit
-// can't accidentally land a partial implementation that drops the
-// helpful error.
+// V-3 shipped `execute` / `close` / `reset` / `ping`; R-6 added the
+// transaction set (`beginTransaction` / `commit` / `rollback` /
+// `savepoint` / `rollbackToSavepoint`) — covered by integration tests
+// against a real server.
 //
-// As each stub is replaced by a real implementation, the matching
-// test moves to a real-DB integration test.
+// The remaining stubs (`prepare`, `bulkLoad`) throw "not yet
+// implemented" so users hitting them get a clear pointer to the
+// round-out commits rather than a silent no-op or a confusing tedious
+// error. These tests pin that contract; as each stub is replaced by a
+// real implementation, the matching test moves to a real-DB
+// integration test.
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,29 +27,6 @@ const dummyTedious = Object.create(TediousConnection.prototype) as TediousConnec
 const wrapper = new TediousConnectionWrapper(dummyTedious, 'conn_stub');
 
 describe('TediousConnectionWrapper — stubs throw with helpful messages', () => {
-	test('beginTransaction() throws "not yet implemented"', async () => {
-		await assert.rejects(() => wrapper.beginTransaction(), /beginTransaction.*not yet implemented/);
-	});
-
-	test('commit() throws "not yet implemented"', async () => {
-		await assert.rejects(() => wrapper.commit(), /commit.*not yet implemented/);
-	});
-
-	test('rollback() throws "not yet implemented"', async () => {
-		await assert.rejects(() => wrapper.rollback(), /rollback.*not yet implemented/);
-	});
-
-	test('savepoint() throws "not yet implemented"', async () => {
-		await assert.rejects(() => wrapper.savepoint(), /savepoint.*not yet implemented/);
-	});
-
-	test('rollbackToSavepoint() throws "not yet implemented"', async () => {
-		await assert.rejects(
-			() => wrapper.rollbackToSavepoint(),
-			/rollbackToSavepoint.*not yet implemented/,
-		);
-	});
-
 	test('prepare() throws "not yet implemented"', async () => {
 		await assert.rejects(() => wrapper.prepare(), /prepare.*not yet implemented/);
 	});

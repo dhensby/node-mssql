@@ -396,6 +396,178 @@ describe('tediousDriver — .columns() first-rowset shape access (integration)',
 	});
 });
 
+// ─── .rowsets() — multi-rowset terminal (integration) ─────────────────────
+//
+// End-to-end validation of the `Rowsets<Tuple>` two-form contract
+// (ADR-0006): awaited buffer returns a tuple of arrays; iterated
+// yields nested AsyncIterable per rowset. Break semantics — inner
+// drains; outer cancels — are exercised here against tedious's
+// real `done` token boundaries.
+
+describe('tediousDriver — .rowsets() multi-rowset (integration)', () => {
+	test('await yields a tuple of arrays for a multi-statement batch', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const [a, b] = await client.sql`
+				SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3;
+				SELECT 'x' AS s UNION ALL SELECT 'y';
+			`.rowsets<[{ n: number }, { s: string }]>();
+			assert.deepEqual(a, [{ n: 1 }, { n: 2 }, { n: 3 }]);
+			assert.deepEqual(b, [{ s: 'x' }, { s: 'y' }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('for await yields one inner iterable per rowset, in source-SQL order', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const collected: unknown[][] = [];
+			for await (const rs of client.sql`
+				SELECT 1 AS n UNION ALL SELECT 2;
+				SELECT 'x' AS s UNION ALL SELECT 'y' UNION ALL SELECT 'z';
+			`.rowsets<[{ n: number }, { s: string }]>()) {
+				const rows: unknown[] = [];
+				for await (const row of rs) rows.push(row);
+				collected.push(rows);
+			}
+			assert.deepEqual(collected, [
+				[{ n: 1 }, { n: 2 }],
+				[{ s: 'x' }, { s: 'y' }, { s: 'z' }],
+			]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('inner break drains remaining rows of current rowset; next rowset arrives intact', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const collected: unknown[][] = [];
+			let outerIndex = 0;
+			for await (const rs of client.sql`
+				SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3;
+				SELECT 10 AS m UNION ALL SELECT 20;
+			`.rowsets<[{ n: number }, { m: number }]>()) {
+				const rows: unknown[] = [];
+				for await (const row of rs) {
+					rows.push(row);
+					if (outerIndex === 0 && rows.length === 1) break;
+				}
+				collected.push(rows);
+				outerIndex++;
+			}
+			assert.deepEqual(collected, [
+				[{ n: 1 }],
+				[{ m: 10 }, { m: 20 }],
+			]);
+			// The connection released cleanly — follow-up query on same
+			// client succeeds.
+			const rows = await client.sql<{ ok: number }>`SELECT 1 AS ok`;
+			assert.deepEqual(rows, [{ ok: 1 }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('outer break cancels the request; follow-up query on same client succeeds', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			let saw = 0;
+			for await (const rs of client.sql`
+				SELECT 1 AS n UNION ALL SELECT 2;
+				SELECT 'x' AS s;
+			`.rowsets<[{ n: number }, { s: string }]>()) {
+				// Drain inner naturally to a clean rowset boundary, then
+				// break the outer — that's the cancel path.
+				for await (const _row of rs) { /* */ }
+				saw++;
+				break;
+			}
+			assert.equal(saw, 1, 'broke after first rowset');
+			// The cancel released the connection — follow-up succeeds.
+			const rows = await client.sql<{ ok: number }>`SELECT 1 AS ok`;
+			assert.deepEqual(rows, [{ ok: 1 }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('await on an empty (no-rowsets) batch resolves to []', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const result = await client.sql`PRINT 'hello'`.rowsets();
+			assert.deepEqual(result, []);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.raw() mode + .rowsets() yields positional tuples', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const q = client.sql`
+				SELECT 1 AS a, 'x' AS b;
+				SELECT 2 AS a, 'y' AS b;
+			`;
+			const result = await q.raw<[number, string]>().rowsets<[
+				[number, string],
+				[number, string],
+			]>();
+			assert.deepEqual(result, [
+				[[1, 'x']],
+				[[2, 'y']],
+			]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('streamed rowset.columns() reports per-rowset shape — maps raw tuples to names', async () => {
+		// The headline use case: a multi-statement batch with DIFFERENT
+		// column shapes per rowset, consumed in raw mode. The per-rowset
+		// `.columns()` is the only way to map positional tuple slots back
+		// to names beyond the first rowset (the Query-level `.columns()`
+		// is locked to the first rowset).
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const q = client.sql`
+				SELECT 1 AS id, 'alice' AS name;
+				SELECT 10 AS orderId, 99 AS amount, 'paid' AS status;
+			`.raw();
+			const perRowset: { names: string[]; mapped: Record<string, unknown>[] }[] = [];
+			for await (const rowset of q.rowsets()) {
+				const cols = await rowset.columns();
+				const names = cols.map((c) => c.name);
+				const mapped: Record<string, unknown>[] = [];
+				for await (const tuple of rowset) {
+					const t = tuple as unknown[];
+					const obj: Record<string, unknown> = {};
+					names.forEach((n, i) => { obj[n] = t[i]; });
+					mapped.push(obj);
+				}
+				perRowset.push({ names, mapped });
+			}
+			assert.deepEqual(perRowset, [
+				{ names: ['id', 'name'], mapped: [{ id: 1, name: 'alice' }] },
+				{
+					names: ['orderId', 'amount', 'status'],
+					mapped: [{ orderId: 10, amount: 99, status: 'paid' }],
+				},
+			]);
+		} finally {
+			await client.close();
+		}
+	});
+});
+
 // ─── Cancel-then-settle ordering against a real server (regression) ─────────
 //
 // The bug guarded against: cancel returning before tedious has

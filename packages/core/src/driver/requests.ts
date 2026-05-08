@@ -18,8 +18,25 @@ export interface ExecuteRequest {
 	readonly kind?: 'batch' | 'rpc'
 }
 
+/**
+ * Transaction isolation levels (ADR-0006). Strict lowercase strings —
+ * other casings (e.g. .NET-style `'ReadCommitted'`) are rejected at the
+ * type level; runtime validation is the driver's responsibility for
+ * dynamically-built strings that bypass the literal type.
+ *
+ * SNAPSHOT requires `ALLOW_SNAPSHOT_ISOLATION ON` at the database level;
+ * the library does not validate this — SQL Server raises an error if
+ * it is off.
+ */
+export type IsolationLevel =
+	| 'read uncommitted'
+	| 'read committed'
+	| 'repeatable read'
+	| 'snapshot'
+	| 'serializable';
+
 export interface TxOptions {
-	readonly isolationLevel?: string
+	readonly isolationLevel?: IsolationLevel
 	readonly name?: string
 }
 

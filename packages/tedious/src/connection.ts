@@ -14,15 +14,37 @@
  */
 
 import { EventEmitter, on, once } from 'node:events';
-import { Request as TediousRequest, type Connection as TediousConnection } from 'tedious';
+import {
+	ISOLATION_LEVEL,
+	Request as TediousRequest,
+	type Connection as TediousConnection,
+} from 'tedious';
 import type {
 	Connection,
 	ConnectionEvents,
 	ExecuteRequest,
+	IsolationLevel,
 	ResultEvent,
+	TxOptions,
 } from '@tediousjs/mssql-core';
 import { EventBridge } from './event-bridge.js';
 import { inferParameterType } from './parameter-types.js';
+
+// Map core's lowercase ADR-0006 isolation level strings to tedious's
+// numeric `ISOLATION_LEVEL` constants. Tedious's `ISOLATION_LEVEL` type
+// is a generic `{ [key: string]: number }`, so each key access widens to
+// `number | undefined` under strict TS — the bracket form with the
+// non-null assertion is the cleanest way to express "these constants
+// are guaranteed to exist". The keys are part of tedious's public API
+// (export from `tedious`) so a missing constant would be a tedious
+// breaking change, surfaced loudly by the TS error here.
+const ISOLATION_LEVEL_MAP: Readonly<Record<IsolationLevel, number>> = {
+	'read uncommitted': ISOLATION_LEVEL.READ_UNCOMMITTED!,
+	'read committed': ISOLATION_LEVEL.READ_COMMITTED!,
+	'repeatable read': ISOLATION_LEVEL.REPEATABLE_READ!,
+	'snapshot': ISOLATION_LEVEL.SNAPSHOT!,
+	'serializable': ISOLATION_LEVEL.SERIALIZABLE!,
+};
 
 const NOT_IMPLEMENTED = (method: string): Error =>
 	new Error(
@@ -36,6 +58,26 @@ const NOT_IMPLEMENTED = (method: string): Error =>
 // 25 is generous for typical row sizes; round-out can tune per-driver
 // when real-workload traces are available.
 const EXECUTE_HIGH_WATER_MARK = 25;
+
+// SQL Server savepoint identifiers: 1–32 characters from the identifier
+// charset (start with a letter, `_`, `@`, or `#`; then letters / digits /
+// `_` / `@` / `#` / `$`). Savepoint names reach the server inside the
+// binary TDS Transaction Manager request, so they cannot inject SQL — but
+// an out-of-spec name is rejected by the server, and a name longer than
+// 127 chars overflows the protocol's one-byte length prefix. The kernel
+// already generates safe names (`savepointName()`, ADR-0016); this is a
+// defensive backstop at the wire boundary, independent of the caller or a
+// future custom id generator.
+const SAVEPOINT_NAME = /^[A-Za-z_@#][A-Za-z0-9_@#$]*$/;
+
+const assertSafeSavepointName = (name: string): void => {
+	if (name.length < 1 || name.length > 32 || !SAVEPOINT_NAME.test(name)) {
+		throw new TypeError(
+			`Invalid savepoint name ${JSON.stringify(name)}: a SQL Server savepoint identifier must be ` +
+				'1–32 characters from [A-Za-z0-9_@#$], starting with a letter, "_", "@", or "#".',
+		);
+	}
+};
 
 export class TediousConnectionWrapper
 	extends EventEmitter<ConnectionEvents>
@@ -169,21 +211,74 @@ export class TediousConnectionWrapper
 		});
 	}
 
-	async beginTransaction(): Promise<void> {
-		throw NOT_IMPLEMENTED('beginTransaction');
+	// ─── Transactions ───────────────────────────────────────────────────
+	//
+	// Tedious's transaction API is callback-based on top of the same
+	// `Connection.execSqlBatch`-class wire ops; we Promise-wrap each.
+	// Concurrency on a single connection is the kernel's responsibility
+	// (the pinned runner used by `Transaction` / `Savepoint` serialises
+	// FIFO) — `connection.beginTransaction` etc. are not safe to fire
+	// while a `Request` is in flight, but the kernel guarantees they
+	// only run between requests.
+
+	async beginTransaction(opts?: TxOptions): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			const isolationLevel = opts?.isolationLevel !== undefined
+				? ISOLATION_LEVEL_MAP[opts.isolationLevel]
+				: undefined;
+			this.#conn.beginTransaction(
+				(err) => {
+					if (err !== undefined && err !== null) reject(err);
+					else resolve();
+				},
+				opts?.name ?? '',
+				isolationLevel,
+			);
+		});
 	}
+
 	async commit(): Promise<void> {
-		throw NOT_IMPLEMENTED('commit');
+		return new Promise<void>((resolve, reject) => {
+			this.#conn.commitTransaction((err) => {
+				if (err !== undefined && err !== null) reject(err);
+				else resolve();
+			});
+		});
 	}
+
 	async rollback(): Promise<void> {
-		throw NOT_IMPLEMENTED('rollback');
+		return new Promise<void>((resolve, reject) => {
+			this.#conn.rollbackTransaction((err) => {
+				if (err !== undefined && err !== null) reject(err);
+				else resolve();
+			});
+		});
 	}
-	async savepoint(): Promise<void> {
-		throw NOT_IMPLEMENTED('savepoint');
+
+	async savepoint(name: string): Promise<void> {
+		assertSafeSavepointName(name);
+		return new Promise<void>((resolve, reject) => {
+			this.#conn.saveTransaction((err) => {
+				if (err !== undefined && err !== null) reject(err);
+				else resolve();
+			}, name);
+		});
 	}
-	async rollbackToSavepoint(): Promise<void> {
-		throw NOT_IMPLEMENTED('rollbackToSavepoint');
+
+	async rollbackToSavepoint(name: string): Promise<void> {
+		assertSafeSavepointName(name);
+		// Tedious's `rollbackTransaction(callback, name)` rolls back to a
+		// named savepoint or named transaction; the no-name variant
+		// rolls back the entire transaction. We use the named variant
+		// here to roll back to the savepoint.
+		return new Promise<void>((resolve, reject) => {
+			this.#conn.rollbackTransaction((err) => {
+				if (err !== undefined && err !== null) reject(err);
+				else resolve();
+			}, name);
+		});
 	}
+
 	async prepare(): Promise<{ id: string }> {
 		throw NOT_IMPLEMENTED('prepare');
 	}

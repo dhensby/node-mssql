@@ -25,10 +25,15 @@
  * idempotent. `Symbol.asyncDispose` calls `release()`.
  */
 
-import type { Connection, ExecuteRequest, ResultEvent } from '../driver/index.js';
+import type { Connection, ExecuteRequest, IsolationLevel, ResultEvent } from '../driver/index.js';
 import type { PooledConnection } from '../pool/index.js';
 import type { Query, RequestRunner } from '../query/index.js';
 import { makeSqlTag, type SqlTag, type UnsafeParams } from './tag.js';
+import {
+	DEFAULT_ISOLATION_LEVEL,
+	makeReservedTransactionBuilder,
+	type SqlTransactionBuilder,
+} from './transaction.js';
 
 const RELEASED =
 	'ReservedConn has been released. Calling a tag on a released connection is not allowed (ADR-0008).';
@@ -39,13 +44,22 @@ const SIGNAL_AFTER_START =
 /**
  * A connection pinned for the lifetime of an `await using` (or until
  * an explicit `.release()`). Inherits the base {@link SqlTag} surface
- * (callable + `.unsafe`) and adds release-related lifecycle.
+ * (callable + `.unsafe`), adds `.transaction()` (a transaction on the
+ * held connection), and release-related lifecycle.
  *
  * Does NOT carry `.acquire` — nested acquires on a pinned connection
  * make no sense (the connection is already pinned). Compare with
  * {@link PoolBoundSqlTag} which adds `.acquire` to the base.
  */
 export interface ReservedConn extends SqlTag, AsyncDisposable {
+	/**
+	 * Open a transaction on the reserved connection. Same
+	 * {@link SqlTransactionBuilder} shape as `sql.transaction()`; the
+	 * transaction runs on the connection this `ReservedConn` holds and
+	 * does not return it to the pool on commit/rollback (the
+	 * `ReservedConn` owns the connection — release it yourself).
+	 */
+	transaction(): SqlTransactionBuilder
 	release(): Promise<void>
 	readonly released: boolean
 }
@@ -73,6 +87,7 @@ export interface SqlAcquireBuilder extends PromiseLike<ReservedConn> {
  */
 export function makeAcquireBuilder(
 	acquire: (signal?: AbortSignal) => Promise<PooledConnection>,
+	defaultIsolationLevel: IsolationLevel = DEFAULT_ISOLATION_LEVEL,
 ): SqlAcquireBuilder {
 	let abortSignal: AbortSignal | undefined;
 	let started: Promise<ReservedConn> | undefined;
@@ -81,7 +96,7 @@ export function makeAcquireBuilder(
 		if (started !== undefined) return started;
 		started = (async () => {
 			const pooled = await acquire(abortSignal);
-			return makeReservedConn(pooled);
+			return makeReservedConn(pooled, defaultIsolationLevel);
 		})();
 		return started;
 	};
@@ -105,9 +120,13 @@ export function makeAcquireBuilder(
  * Wrap a {@link PooledConnection} as a {@link ReservedConn}. Internal —
  * users get one of these via `sql.acquire()`.
  */
-export function makeReservedConn(pooled: PooledConnection): ReservedConn {
+export function makeReservedConn(
+	pooled: PooledConnection,
+	defaultIsolationLevel: IsolationLevel = DEFAULT_ISOLATION_LEVEL,
+): ReservedConn {
 	let released = false;
-	const baseTag = makeSqlTag(pinnedRunner(pooled.connection));
+	const pinned = pinnedConnection(pooled.connection);
+	const baseTag = makeSqlTag(pinned.runner);
 
 	function callable<T = unknown>(
 		strings: TemplateStringsArray,
@@ -125,6 +144,19 @@ export function makeReservedConn(pooled: PooledConnection): ReservedConn {
 		if (released) throw new TypeError(RELEASED);
 		return baseTag.unsafe<T>(text, params);
 	};
+	conn.transaction = function transaction(): SqlTransactionBuilder {
+		if (released) throw new TypeError(RELEASED);
+		// Share the reserved connection AND its FIFO queue (tag + exclusive)
+		// so transaction queries and control ops serialise with bare
+		// reserved-connection queries on the one queue; the transaction's
+		// settle does not release the connection (the ReservedConn owns it).
+		return makeReservedTransactionBuilder(
+			pooled.connection,
+			baseTag,
+			pinned.exclusive,
+			defaultIsolationLevel,
+		);
+	};
 	conn.release = async function release(): Promise<void> {
 		if (released) return;
 		released = true;
@@ -140,34 +172,75 @@ export function makeReservedConn(pooled: PooledConnection): ReservedConn {
 }
 
 /**
- * `RequestRunner` for a single pinned {@link Connection}. FIFO-serialises
- * concurrent `run()` calls because TDS allows only one in-flight request
- * per connection.
+ * A single pinned {@link Connection} with FIFO-serialised access. TDS
+ * serves only one in-flight request per connection, so *every* operation
+ * shares one queue: tag queries via {@link PinnedConnection.runner} and
+ * transaction control ops (BEGIN / COMMIT / ROLLBACK / SAVE / ROLLBACK TO)
+ * via {@link PinnedConnection.exclusive}. Each waits for the previous to
+ * settle; none overlaps another.
  *
- * A failing previous request does NOT abort subsequent ones — the chain
+ * A failing operation does NOT poison the queue — the chain
  * `await prev.catch(swallow)` waits for settlement (success OR failure)
- * and lets the next call proceed cleanly.
+ * and lets the next proceed cleanly.
  */
-function pinnedRunner(connection: Connection): RequestRunner {
+export interface PinnedConnection {
+	/** FIFO-serialised {@link RequestRunner} for tag queries. */
+	readonly runner: RequestRunner
+	/**
+	 * Run a control op exclusively on the pinned connection — after every
+	 * prior queued operation settles, blocking subsequent ones until it
+	 * resolves. The transaction scope routes its wire control ops through
+	 * here so a `COMMIT` / `SAVE` / `ROLLBACK` never overlaps a query or
+	 * one another.
+	 */
+	exclusive<T>(op: () => Promise<T>): Promise<T>
+}
+
+/**
+ * Build a {@link PinnedConnection} over one {@link Connection}. Exported
+ * (rather than file-private) so the transaction / savepoint scopes — which
+ * also pin one connection for their duration — share the same FIFO queue
+ * rather than re-implementing it.
+ */
+export function pinnedConnection(connection: Connection): PinnedConnection {
 	let lastSettled: Promise<void> = Promise.resolve();
 	const swallow = (): void => { /* deliberate: prior errors don't poison the queue */ };
 
-	return {
-		run(req: ExecuteRequest, signal?: AbortSignal): AsyncIterable<ResultEvent> {
-			const prev = lastSettled;
-			let resolveDone!: () => void;
-			lastSettled = new Promise<void>((res) => { resolveDone = res; });
+	// Reserve the next slot in the FIFO chain: capture the predecessor to
+	// await, publish a fresh barrier for the successor, and return the `done`
+	// that releases it. Shared by `runner.run` (queries) and `exclusive`
+	// (control ops) so both interleave on the one queue.
+	const reserve = (): { prev: Promise<void>; done: () => void } => {
+		const prev = lastSettled;
+		let done!: () => void;
+		lastSettled = new Promise<void>((res) => { done = res; });
+		return { prev, done };
+	};
 
-			return (async function* () {
-				try {
-					await prev.catch(swallow);
-					for await (const ev of connection.execute(req, signal)) {
-						yield ev;
+	return {
+		runner: {
+			run(req: ExecuteRequest, signal?: AbortSignal): AsyncIterable<ResultEvent> {
+				const { prev, done } = reserve();
+				return (async function* () {
+					try {
+						await prev.catch(swallow);
+						for await (const ev of connection.execute(req, signal)) {
+							yield ev;
+						}
+					} finally {
+						done();
 					}
-				} finally {
-					resolveDone();
-				}
-			})();
+				})();
+			},
+		},
+		async exclusive<T>(op: () => Promise<T>): Promise<T> {
+			const { prev, done } = reserve();
+			try {
+				await prev.catch(swallow);
+				return await op();
+			} finally {
+				done();
+			}
 		},
 	};
 }

@@ -35,6 +35,9 @@ interface ConnLog {
 	executes: ExecuteRequest[]
 	executeSignals: (AbortSignal | undefined)[]
 	closed: boolean
+	beginCalls: number
+	commitCalls: number
+	rollbackCalls: number
 }
 
 class FakeConnection
@@ -42,7 +45,10 @@ class FakeConnection
 	implements Connection
 {
 	readonly id = 'conn_test_1';
-	readonly log: ConnLog = { executes: [], executeSignals: [], closed: false };
+	readonly log: ConnLog = {
+		executes: [], executeSignals: [], closed: false,
+		beginCalls: 0, commitCalls: 0, rollbackCalls: 0,
+	};
 	#scripted: ResultEvent[][] | undefined;
 	#callIndex = 0;
 	// Override hook for tests that need bespoke execute behaviour (e.g.
@@ -66,9 +72,9 @@ class FakeConnection
 			for (const e of events) yield e;
 		})();
 	}
-	async beginTransaction(): Promise<void> { /* */ }
-	async commit(): Promise<void> { /* */ }
-	async rollback(): Promise<void> { /* */ }
+	async beginTransaction(): Promise<void> { this.log.beginCalls++; }
+	async commit(): Promise<void> { this.log.commitCalls++; }
+	async rollback(): Promise<void> { this.log.rollbackCalls++; }
 	async savepoint(): Promise<void> { /* */ }
 	async rollbackToSavepoint(): Promise<void> { /* */ }
 	async prepare(_req: PrepareRequest): Promise<PreparedHandle> {
@@ -413,5 +419,58 @@ describe('PoolBoundSqlTag — surface', () => {
 		} finally {
 			await conn.release();
 		}
+	});
+});
+
+// ─── ReservedConn.transaction() — transaction on a held connection ─────────
+
+describe('ReservedConn — .transaction()', () => {
+	test('opens a transaction on the held connection (BEGIN on the same conn)', async () => {
+		const { sql, connLog, poolLog } = makePool();
+		await using conn = await sql.acquire();
+		const tx = await conn.transaction();
+		try {
+			await tx`SELECT 1`;
+			assert.equal(connLog.beginCalls, 1, 'BEGIN fired on the held connection');
+			assert.equal(poolLog.acquires, 1, 'no second acquire — reused the held connection');
+		} finally {
+			await tx.commit();
+		}
+	});
+
+	test('committing the transaction does NOT release the connection (the ReservedConn owns it)', async () => {
+		const { sql, connLog, poolLog } = makePool();
+		const conn = await sql.acquire();
+		const tx = await conn.transaction();
+		await tx.commit();
+		assert.equal(connLog.commitCalls, 1);
+		assert.equal(poolLog.releases, 0, 'commit did not return the connection to the pool');
+		// The ReservedConn is still usable after the transaction commits.
+		await conn`SELECT after-commit`;
+		assert.equal(connLog.executes.at(-1)?.sql, 'SELECT after-commit');
+		// Releasing the ReservedConn is what returns it to the pool.
+		await conn.release();
+		assert.equal(poolLog.releases, 1);
+	});
+
+	test('the transaction supports savepoints on the held connection', async () => {
+		const { sql } = makePool();
+		await using conn = await sql.acquire();
+		const tx = await conn.transaction();
+		try {
+			const sp = await tx.savepoint();
+			await sp.rollback();
+		} finally {
+			await tx.commit();
+		}
+	});
+
+	test('queries after the ReservedConn is released throw', async () => {
+		const { sql } = makePool();
+		const conn = await sql.acquire();
+		const tx = await conn.transaction();
+		await tx.commit();
+		await conn.release();
+		assert.throws(() => conn`SELECT 1`, TypeError);
 	});
 });

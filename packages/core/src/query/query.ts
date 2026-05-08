@@ -118,15 +118,44 @@ export class Query<T = unknown> implements
 	// `#composedSignal()` call.
 	#compositeSignal: AbortSignal | undefined;
 
-	// Resolves when `#streamEvents` fully terminates (its `finally`
-	// fires). `cancel()` and `dispose()` await this so they don't
-	// resolve until the runner stream has settled — load-bearing for
-	// the connection-release ordering: the surrounding poolRunner's
-	// `await using pooled` disposal must not fire until tedious has
-	// settled the cancel response, otherwise `Connection.reset()` runs
-	// on top of an unsettled cancel.
+	// Resolves when the runner stream fully terminates (`#streamEvents`
+	// `finally` or shape pump's end / error / cancel). `cancel()` and
+	// `dispose()` await this so they don't resolve until the runner has
+	// settled — load-bearing for the connection-release ordering: the
+	// surrounding poolRunner's `await using pooled` disposal must not
+	// fire until tedious has settled the cancel response, otherwise
+	// `Connection.reset()` runs on top of an unsettled cancel.
 	#terminationPromise: Promise<void> | null = null;
 	#terminationResolve: (() => void) | null = null;
+
+	// Single shared runner iterator at instance level — both the
+	// shape-only pump (for `.columns()`) and the row-terminal stream
+	// consumer pull from this. Lazy-init on first pull.
+	#runnerIter: AsyncIterator<ResultEvent> | null = null;
+
+	// Events pulled by the shape-only pump (when `.columns()` runs alone)
+	// but not yet handed to a row terminal. The row terminal drains this
+	// before continuing from `#runnerIter`.
+	#lookahead: ResultEvent[] = [];
+
+	// Stored stream-level error. The shape-only pump catches errors
+	// here so a row terminal called later can re-throw them. Also set
+	// by `#streamEvents`'s catch so a `.columns()` call after a failed
+	// terminal can reject promptly.
+	#streamError: Error | null = null;
+
+	// Shape pump's run promise — non-null while it's in flight or
+	// after it has settled. Row terminals await this so the lookahead
+	// is fully populated before they drain.
+	#shapePumpPromise: Promise<void> | null = null;
+
+	// Captured-once first-rowset columns. Returned by `.columns()` and
+	// resolved internally by `#streamEvents` when metadata arrives
+	// during normal terminal consumption.
+	#firstColumns: readonly ColumnMetadata[] | null = null;
+	#columnsPromise: Promise<readonly ColumnMetadata[]> | null = null;
+	#columnsResolve: ((cols: readonly ColumnMetadata[]) => void) | null = null;
+	#columnsReject: ((err: unknown) => void) | null = null;
 
 	constructor(options: QueryOptions) {
 		this.#runner = options.runner;
@@ -257,6 +286,62 @@ export class Query<T = unknown> implements
 		});
 	}
 
+	// ─── Shape introspection (non-consuming) ─────────────────────────────
+
+	/**
+	 * Resolve the column metadata for the FIRST rowset (ADR-0007).
+	 *
+	 * Locked to the first rowset — multiple calls return the same
+	 * Promise. If a row-consuming terminal has already fired, the
+	 * returned Promise resolves when metadata flows through the shared
+	 * stream (or immediately if it's already been seen). If no terminal
+	 * has fired yet, `.columns()` kicks off a "shape-only pump" that
+	 * pulls events from the runner until the first metadata token, then
+	 * stops — the runner iterator is left paused, with driver-level
+	 * backpressure holding the connection until either a row terminal
+	 * continues consumption or `.dispose()` cancels and releases.
+	 *
+	 * Edge cases:
+	 * - No rowsets (e.g. pure DML): resolves to `[]` when the stream
+	 *   ends without ever emitting metadata.
+	 * - Stream errors before metadata: rejects with the same error
+	 *   the row terminal would have surfaced.
+	 * - Disposed Query: rejects with `TypeError`.
+	 */
+	columns(): Promise<readonly ColumnMetadata[]> {
+		if (this.#disposed) {
+			return Promise.reject(new TypeError(DISPOSED));
+		}
+		// Already-resolved fast path.
+		if (this.#firstColumns !== null) {
+			return Promise.resolve(this.#firstColumns);
+		}
+		// Cached pending promise.
+		if (this.#columnsPromise !== null) {
+			return this.#columnsPromise;
+		}
+		// Stream already terminated without metadata — settle synchronously.
+		// Either the row terminal drained without ever seeing metadata
+		// (resolve []) or it errored before metadata (reject with error).
+		if (this.#terminated) {
+			if (this.#streamError !== null) {
+				return Promise.reject(this.#streamError);
+			}
+			this.#firstColumns = [];
+			return Promise.resolve(this.#firstColumns);
+		}
+		// Set up the pending Promise and (if no terminal has fired yet)
+		// kick off the shape-only pump.
+		this.#columnsPromise = new Promise<readonly ColumnMetadata[]>((resolve, reject) => {
+			this.#columnsResolve = resolve;
+			this.#columnsReject = reject;
+		});
+		if (!this.#consumed && this.#shapePumpPromise === null) {
+			this.#shapePumpPromise = this.#runShapePump();
+		}
+		return this.#columnsPromise;
+	}
+
 	// ─── Trailer access (non-consuming) ──────────────────────────────────
 
 	/**
@@ -297,6 +382,37 @@ export class Query<T = unknown> implements
 		if (!this.#ownAbortController.signal.aborted) {
 			this.#ownAbortController.abort();
 		}
+
+		// Shape-only path: a `.columns()` shape pump has paused the
+		// runner iterator and there's no row terminal consuming. The
+		// signal abort alone won't wake the suspended runner generator
+		// (it's parked at `yield`, not awaiting events.on). Call
+		// `iter.return()` to abruptly terminate the generator and
+		// trigger its cleanup chain (poolRunner's `await using pooled`
+		// → release; tedious's bridge.destroy() → cancel-ack wait). The
+		// `await` is load-bearing for the cancel-then-settle ordering.
+		if (this.#runnerIter !== null && !this.#consumed && !this.#terminated) {
+			try {
+				await this.#runnerIter.return?.();
+			} catch {
+				// Best-effort — cleanup errors are not actionable here.
+			}
+			this.#markTerminated();
+		}
+
+		// If `.columns()` was awaited but never resolved (cancel arrived
+		// before metadata), reject it with the abort reason.
+		if (this.#columnsResolve !== null && this.#firstColumns === null) {
+			const reason = this.#ownAbortController.signal.reason;
+			const err = reason instanceof Error
+				? reason
+				: new Error('Query was cancelled before column metadata arrived');
+			this.#streamError = err;
+			this.#columnsReject?.(err);
+			this.#columnsResolve = null;
+			this.#columnsReject = null;
+		}
+
 		// Await full runner-stream termination if a stream is in flight.
 		// This is load-bearing — without the wait, the surrounding
 		// poolRunner's `await using pooled` disposal would fire while
@@ -351,28 +467,172 @@ export class Query<T = unknown> implements
 		return this.#compositeSignal;
 	}
 
-	// Driver-stream consumer. Updates the trailer for every event and
-	// yields each event to the caller. Sets `#terminated` in `finally`
-	// so abnormal exits (consumer break, runner error) still mark the
-	// stream as terminated for `.meta()` access. `#completed` is set
-	// only on natural drain.
-	async *#streamEvents(): AsyncIterable<ResultEvent> {
-		// Set up termination promise on first stream start. `cancel()` /
-		// `dispose()` await this so a cancel returns only after the
-		// runner has fully unwound — including the runner's own
-		// cleanup work (`bridge.destroy()` for tedious, etc).
+	// Lazy-initialise the shared runner iterator + termination promise.
+	// Both `.columns()`'s shape pump and `#streamEvents` go through this,
+	// so the iterator is allocated exactly once per Query and the
+	// termination promise is paired with its lifetime.
+	#ensureRunnerIter(): AsyncIterator<ResultEvent> {
+		if (this.#runnerIter !== null) return this.#runnerIter;
 		this.#terminationPromise = new Promise<void>((res) => {
 			this.#terminationResolve = res;
 		});
+		this.#runnerIter = this.#runner.run(
+			this.#request,
+			this.#composedSignal(),
+		)[Symbol.asyncIterator]();
+		return this.#runnerIter;
+	}
+
+	#markTerminated(): void {
+		if (this.#terminated) return;
+		this.#terminated = true;
+		this.#terminationResolve?.();
+	}
+
+	// Apply per-event side effects (trailer accumulation; first-rowset
+	// columns capture). Called on every event consumed from the runner
+	// regardless of which path (shape pump or row terminal) drove it.
+	#observeEvent(event: ResultEvent): void {
+		this.#updateTrailer(event);
+		if (event.kind === 'metadata' && this.#firstColumns === null) {
+			this.#firstColumns = event.columns;
+			this.#columnsResolve?.(event.columns);
+			this.#columnsResolve = null;
+			this.#columnsReject = null;
+		}
+	}
+
+	// Shape-only pump for `.columns()`. Pulls events into the lookahead
+	// buffer until the FIRST metadata token (or end-of-stream / error),
+	// then stops calling `iter.next()` — the iterator is left paused;
+	// driver-level backpressure holds the connection until either a row
+	// terminal continues consumption or `.dispose()` cancels it.
+	async #runShapePump(): Promise<void> {
+		const iter = this.#ensureRunnerIter();
 		try {
-			for await (const event of this.#runner.run(this.#request, this.#composedSignal())) {
-				this.#updateTrailer(event);
-				yield event;
+			while (true) {
+				const { value, done } = await iter.next();
+				if (done) {
+					// Stream ended without metadata — DML query, etc.
+					if (this.#firstColumns === null) {
+						this.#firstColumns = [];
+						this.#columnsResolve?.([]);
+						this.#columnsResolve = null;
+						this.#columnsReject = null;
+					}
+					this.#trailer.completed = true;
+					this.#markTerminated();
+					return;
+				}
+				this.#observeEvent(value);
+				this.#lookahead.push(value);
+				if (value.kind === 'metadata') {
+					// First metadata seen — `#observeEvent` has resolved
+					// the columns promise. Stop pulling; the iterator is
+					// left paused for a row terminal to resume (or for
+					// `.dispose()` to release).
+					return;
+				}
+			}
+		} catch (err) {
+			this.#streamError = err as Error;
+			if (this.#firstColumns === null) {
+				this.#columnsReject?.(err);
+				this.#columnsResolve = null;
+				this.#columnsReject = null;
+			}
+			this.#markTerminated();
+		}
+	}
+
+	// Driver-stream consumer for row-consuming terminals. Drains the
+	// shape-pump lookahead first (if any), then continues from the
+	// shared runner iterator. Sets `#terminated` in `finally` so
+	// abnormal exits (consumer break, runner error) still mark the
+	// stream as terminated for `.meta()` access. `#completed` is set
+	// only on natural drain.
+	async *#streamEvents(): AsyncIterable<ResultEvent> {
+		// 1. Wait for any in-flight shape pump to finish — it owns the
+		//    iterator until then. Errors from the pump are stored on
+		//    `#streamError`, not thrown here, so the shape pump's
+		//    promise always settles cleanly.
+		if (this.#shapePumpPromise !== null) {
+			await this.#shapePumpPromise;
+		}
+		// 2. If no shape pump set up the runner iter / termination
+		//    promise, do it now (this is the no-`columns()` fast path).
+		this.#ensureRunnerIter();
+		try {
+			// 3. Re-throw the shape pump's stored error before yielding
+			//    anything — the row terminal sees the failure exactly as
+			//    if it had been consuming the stream itself.
+			if (this.#streamError !== null) {
+				throw this.#streamError;
+			}
+			// 4. Drain the lookahead buffer first so the row terminal
+			//    sees events in arrival order.
+			if (this.#lookahead.length > 0) {
+				const buffered = this.#lookahead;
+				this.#lookahead = [];
+				for (const event of buffered) {
+					yield event;
+				}
+			}
+			// 5. Continue pulling from the shared iterator.
+			const iter = this.#ensureRunnerIter();
+			while (true) {
+				const { value, done } = await iter.next();
+				if (done) break;
+				this.#observeEvent(value);
+				yield value;
 			}
 			this.#trailer.completed = true;
+		} catch (err) {
+			// Store the error so a `.columns()` call AFTER a failed
+			// terminal can settle promptly. Re-reject any pending
+			// columns promise that didn't see metadata.
+			this.#streamError = err as Error;
+			if (this.#firstColumns === null) {
+				this.#columnsReject?.(err);
+				this.#columnsResolve = null;
+				this.#columnsReject = null;
+			}
+			throw err;
 		} finally {
-			this.#terminated = true;
-			this.#terminationResolve?.();
+			this.#markTerminated();
+			// If `.columns()` was awaited but the stream ended without
+			// metadata and without error, resolve with `[]`.
+			if (
+				this.#firstColumns === null
+				&& this.#columnsResolve !== null
+				&& this.#streamError === null
+			) {
+				this.#firstColumns = [];
+				this.#columnsResolve([]);
+				this.#columnsResolve = null;
+				this.#columnsReject = null;
+			}
+			// Propagate cleanup to the shared runner iterator. The
+			// manual `iter.next()` loop above doesn't get the automatic
+			// `iter.return()` that `for await ... of` would emit on
+			// abnormal exits — we have to call it ourselves so the
+			// runner's `try/finally` (poolRunner's `await using pooled`
+			// → release; tedious's `bridge.destroy()` → cancel-ack
+			// settle) fires when the consumer breaks out of `for await`,
+			// when `#consumeRows` throws (e.g. `MultipleRowsetsError`),
+			// or when any downstream observer throws. Natural drain
+			// exhausted the iterator already (`done: true`), so this
+			// is a no-op there. Cleanup errors are swallowed — by the
+			// time we're here, the consumer has already seen its
+			// terminal value (returned rows, threw, or completed).
+			if (this.#runnerIter !== null) {
+				try {
+					await this.#runnerIter.return?.();
+				} catch {
+					// Swallow — runner cleanup errors are not actionable
+					// at this layer.
+				}
+			}
 		}
 	}
 

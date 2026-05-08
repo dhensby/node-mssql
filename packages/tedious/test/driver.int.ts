@@ -277,6 +277,125 @@ describe('tediousDriver — round-out terminals (integration)', () => {
 	});
 });
 
+// ─── .columns() — first-rowset shape access (integration) ──────────────────
+//
+// Validates the shape-only pump path against a real driver: the pump
+// pulls events until tedious emits the `columnMetadata` token, then
+// stops. The connection stays held by the surrounding poolRunner
+// (driver-level backpressure on the wire), and a subsequent row
+// terminal continues from the same paused iterator. `.dispose()` on a
+// paused shape pump must call `iter.return()` through to the bridge,
+// which cancels the in-flight request and releases the connection.
+
+describe('tediousDriver — .columns() first-rowset shape access (integration)', () => {
+	test('resolves to the column metadata of a SELECT before any terminal fires', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const q = client.sql`SELECT 1 AS a, 'x' AS b`;
+			const cols = await q.columns();
+			assert.deepEqual(cols.map((c) => c.name), ['a', 'b']);
+			// Drive the stream to completion so the connection releases
+			// cleanly back to the pool.
+			await q.run();
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('terminal after .columns() drains the lookahead and yields rows', async () => {
+		// Lookahead handoff — the shape pump captures the metadata into
+		// the buffer; the row terminal drains the buffer first, then
+		// continues from the same paused iterator. End-to-end: a single
+		// connection acquisition, one tedious Request, a single round-
+		// trip's worth of work.
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const q = client.sql<{ n: number }>`
+				SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3
+			`;
+			const cols = await q.columns();
+			assert.deepEqual(cols.map((c) => c.name), ['n']);
+			const rows = await q.all();
+			assert.deepEqual(rows, [{ n: 1 }, { n: 2 }, { n: 3 }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.columns() is locked to the FIRST rowset on multi-statement batches', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const q = client.sql`
+				SELECT 1 AS first;
+				SELECT 2 AS second;
+			`;
+			const cols = await q.columns();
+			assert.deepEqual(cols.map((c) => c.name), ['first']);
+			// Drive to completion via .run() (rowset-oblivious).
+			await q.run();
+			const colsAgain = await q.columns();
+			assert.deepEqual(colsAgain.map((c) => c.name), ['first']);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.columns() resolves to [] for a query that produces no rowsets', async () => {
+		// Pure DDL/DML — no metadata token ever flows. The shape pump
+		// reaches the end of the stream and resolves with [].
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const cols = await client.sql`PRINT 'no rowsets here'`.columns();
+			assert.deepEqual(cols, []);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.dispose() on a paused shape pump cancels and releases cleanly', async () => {
+		// `WAITFOR DELAY '00:00:10'` parks the server-side request before
+		// any rowset arrives. `.columns()` would normally resolve only
+		// once metadata flows; with no metadata in flight, the shape
+		// pump waits. `.dispose()` must call iter.return() through to
+		// the bridge and release the connection — confirmed by a
+		// follow-up query on the same client succeeding immediately.
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const q = client.sql`WAITFOR DELAY '00:00:10'; SELECT 1 AS n`;
+			const colsPromise = q.columns();
+			// Yield to let the shape pump kick the request off.
+			await new Promise((r) => setTimeout(r, 50));
+			await q.dispose();
+			// The columns promise rejects (cancelled before metadata).
+			await assert.rejects(() => colsPromise);
+			// Follow-up query on the same client succeeds — the shape
+			// pump's dispose path released the connection cleanly.
+			const rows = await client.sql<{ n: number }>`SELECT 1 AS n`;
+			assert.deepEqual(rows, [{ n: 1 }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('Promise.all([columns(), all()]) returns matching shape and rows', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const q = client.sql<{ n: number }>`SELECT 1 AS n UNION ALL SELECT 2`;
+			const [cols, rows] = await Promise.all([q.columns(), q.all()]);
+			assert.deepEqual(cols.map((c) => c.name), ['n']);
+			assert.deepEqual(rows, [{ n: 1 }, { n: 2 }]);
+		} finally {
+			await client.close();
+		}
+	});
+});
+
 // ─── Cancel-then-settle ordering against a real server (regression) ─────────
 //
 // The bug guarded against: cancel returning before tedious has

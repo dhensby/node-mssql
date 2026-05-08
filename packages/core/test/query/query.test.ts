@@ -947,6 +947,349 @@ describe('Query.raw() — view toggle', () => {
 	});
 });
 
+// ─── Query.columns() — first-rowset shape access ────────────────────────────
+//
+// `.columns()` is a non-consuming terminal that resolves to the column
+// metadata of the FIRST rowset (ADR-0007). Two execution paths:
+//
+// 1. Called BEFORE any row terminal: a "shape-only pump" pulls events
+//    from the runner into a lookahead buffer until the first metadata
+//    token, then stops — the runner iterator is left paused, with
+//    driver-level backpressure holding the connection. A subsequent row
+//    terminal drains the lookahead and continues from the same runner
+//    iterator (no second `runner.run()` call). `.dispose()` / `.cancel()`
+//    on a paused shape-pump triggers `iter.return()` on the runner,
+//    firing its `try/finally` cleanup chain.
+//
+// 2. Called AFTER (or concurrently with) a row terminal: the row
+//    terminal is the sole consumer of the runner; `.columns()` waits
+//    for `#observeEvent` to capture the first metadata token and
+//    resolve the cached promise.
+//
+// In both paths, `.columns()` returns the SAME Promise across repeat
+// calls (locked to the first rowset), is concurrent-safe, and resolves
+// to `[]` for a query that produces no rowsets (e.g. pure DML).
+
+describe('Query.columns() — first-rowset shape access', () => {
+	test('resolves to the first-rowset metadata when called before any terminal', async () => {
+		const { runner, log } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'a' }, { name: 'b' }] },
+			{ kind: 'row', values: [1, 'x'] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT a, b FROM t') });
+		const cols = await q.columns();
+		assert.deepEqual(cols, [{ name: 'a' }, { name: 'b' }]);
+		// Shape pump kicked off a runner.run(); cleanup hasn't fired yet —
+		// the iterator is left paused, awaiting either a row terminal or
+		// dispose().
+		assert.equal(log.calls, 1);
+		assert.equal(log.releases, 0, 'iter left paused — runner finally not yet fired');
+	});
+
+	test('resolves to the first-rowset metadata when called after a terminal', async () => {
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT n') });
+		await q.all();
+		// After natural drain, `.columns()` resolves synchronously from
+		// the captured first-rowset metadata.
+		const cols = await q.columns();
+		assert.deepEqual(cols, [{ name: 'n' }]);
+	});
+
+	test('returns the same Promise on repeat calls (locked to first rowset)', async () => {
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'a' }] },
+			{ kind: 'rowsetEnd', rowsAffected: 0 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT a') });
+		const p1 = q.columns();
+		const p2 = q.columns();
+		assert.equal(p1, p2, 'same Promise instance returned on repeat calls');
+		await q.all();  // drive the stream so the promise resolves
+		assert.deepEqual(await p1, [{ name: 'a' }]);
+	});
+
+	test('after the first metadata is captured, repeat calls resolve to the same content', async () => {
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT n') });
+		await q.all();
+		const a = await q.columns();
+		const b = await q.columns();
+		assert.deepEqual(a, b);
+		assert.deepEqual(a, [{ name: 'n' }]);
+	});
+
+	test('does NOT consume the Query — terminals can fire after .columns()', async () => {
+		const { runner, log } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'row', values: [2] },
+			{ kind: 'rowsetEnd', rowsAffected: 2 },
+			{ kind: 'done' },
+		]);
+		const q = new Query<{ n: number }>({ runner, request: stmt('SELECT n') });
+		const cols = await q.columns();
+		assert.deepEqual(cols, [{ name: 'n' }]);
+		// Terminal still fires — `.columns()` did not flip the
+		// single-consumption flag.
+		const rows = await q.all();
+		assert.deepEqual(rows, [{ n: 1 }, { n: 2 }]);
+		// Single runner.run() call across .columns() + .all() — the row
+		// terminal continued from the paused shape-pump iterator rather
+		// than starting a fresh stream.
+		assert.equal(log.calls, 1, 'shape pump + terminal share one runner.run() call');
+		assert.equal(log.releases, 1, 'natural drain fired runner finally exactly once');
+	});
+
+	test('terminal after columns() sees metadata and rows in arrival order', async () => {
+		// The shape pump captures the metadata event into a lookahead
+		// buffer; the row terminal drains it before continuing from the
+		// runner iterator. Verifies the lookahead → continuation handoff.
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [10] },
+			{ kind: 'row', values: [20] },
+			{ kind: 'rowsetEnd', rowsAffected: 2 },
+			{ kind: 'done' },
+		]);
+		const q = new Query<{ n: number }>({ runner, request: stmt('SELECT n') });
+		await q.columns();
+		const rows: number[] = [];
+		for await (const row of q.iterate()) {
+			rows.push(row.n);
+		}
+		assert.deepEqual(rows, [10, 20]);
+	});
+
+	test('resolves to [] for a query that produces no rowsets', async () => {
+		// Pure-DML / WAITFOR style — driver emits a `done` (or
+		// rowsetEnd + done) without ever sending metadata. `.columns()`
+		// resolves to the empty array.
+		const { runner } = makeFakeRunner([
+			{ kind: 'rowsetEnd', rowsAffected: 0 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('UPDATE t SET x = 1 WHERE 1 = 0') });
+		const cols = await q.columns();
+		assert.deepEqual(cols, []);
+	});
+
+	test('resolves to [] when no terminal fires and the stream has no rowsets', async () => {
+		// Same shape as above but checks the shape-pump path drives the
+		// runner to natural end, then settles `.columns()` with [].
+		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const q = new Query({ runner, request: stmt('UPDATE t SET x = 1 WHERE 1 = 0') });
+		const cols = await q.columns();
+		assert.deepEqual(cols, []);
+		// Shape pump exhausted the runner naturally — finally fired.
+		assert.equal(log.releases, 1);
+	});
+
+	test('rejects with the stream error if the stream errors before metadata', async () => {
+		const boom = new Error('connection lost');
+		const runner: RequestRunner = {
+			run() {
+				// The throw lives in `run()` itself — no need for a generator
+				// at all when we never yield. Returning an async iterable
+				// whose first `.next()` rejects exercises the same code
+				// path as a generator that throws on entry.
+				const iter: AsyncIterableIterator<ResultEvent> = {
+					[Symbol.asyncIterator]() { return this; },
+					next() { return Promise.reject(boom); },
+				};
+				return iter;
+			},
+		};
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		await assert.rejects(() => q.columns(), /connection lost/);
+	});
+
+	test('after a failed terminal, .columns() rejects with the same error', async () => {
+		const boom = new Error('mid-stream failure');
+		const runner: RequestRunner = {
+			run() {
+				return (async function* () {
+					yield { kind: 'metadata', columns: [{ name: 'a' }] } satisfies ResultEvent;
+					throw boom;
+				})();
+			},
+		};
+		const q = new Query({ runner, request: stmt('SELECT a') });
+		// Even though metadata flowed BEFORE the error, the failed terminal
+		// captured the columns into `#firstColumns` via observation. So
+		// `.columns()` returns those columns from the fast path. This
+		// matches the non-consuming contract: `.columns()` describes the
+		// shape that DID flow, regardless of subsequent errors.
+		await assert.rejects(() => q.all(), /mid-stream failure/);
+		const cols = await q.columns();
+		assert.deepEqual(cols, [{ name: 'a' }]);
+	});
+
+	test('rejects with the stream error when the terminal errors before metadata', async () => {
+		// Same shape as above, but the error fires BEFORE metadata. The
+		// shape was never observed, so `.columns()` rejects with the
+		// stored stream error.
+		const boom = new Error('protocol failure');
+		const runner: RequestRunner = {
+			run() {
+				const iter: AsyncIterableIterator<ResultEvent> = {
+					[Symbol.asyncIterator]() { return this; },
+					next() { return Promise.reject(boom); },
+				};
+				return iter;
+			},
+		};
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		await assert.rejects(() => q.all(), /protocol failure/);
+		await assert.rejects(() => q.columns(), /protocol failure/);
+	});
+
+	test('rejects with TypeError on a disposed Query', async () => {
+		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		await q.dispose();
+		await assert.rejects(() => q.columns(), TypeError);
+	});
+
+	test('dispose() while .columns() is pending rejects the columns promise', async () => {
+		// Driver that parks on the signal's abort — simulates a real
+		// connection where metadata hasn't flowed yet because the server
+		// is still preparing the result set.
+		const runner: RequestRunner = {
+			run(_req, signal) {
+				return (async function* () {
+					yield await new Promise<never>((_resolve, reject) => {
+						signal!.addEventListener('abort', () => {
+							reject(new Error('aborted'));
+						});
+					});
+				})();
+			},
+		};
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		const colsPromise = q.columns();
+		// Yield to let the shape pump start.
+		await new Promise((r) => setImmediate(r));
+		await q.dispose();
+		await assert.rejects(() => colsPromise);
+	});
+
+	test('cancel() before metadata rejects the columns promise', async () => {
+		const runner: RequestRunner = {
+			run(_req, signal) {
+				return (async function* () {
+					yield await new Promise<never>((_resolve, reject) => {
+						signal!.addEventListener('abort', () => {
+							reject(new Error('aborted'));
+						});
+					});
+				})();
+			},
+		};
+		const q = new Query({ runner, request: stmt('SELECT 1') });
+		const colsPromise = q.columns();
+		await new Promise((r) => setImmediate(r));
+		await q.cancel();
+		await assert.rejects(() => colsPromise);
+	});
+
+	test('q.raw().columns() works the same as q.columns() — view toggle does not affect shape access', async () => {
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'a' }, { name: 'b' }] },
+			{ kind: 'row', values: [1, 2] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT a, b FROM t') });
+		const cols = await q.raw().columns();
+		assert.deepEqual(cols, [{ name: 'a' }, { name: 'b' }]);
+	});
+
+	test('Promise.all([columns(), all()]) — concurrent-safe across both consumers', async () => {
+		const { runner, log } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'row', values: [2] },
+			{ kind: 'rowsetEnd', rowsAffected: 2 },
+			{ kind: 'done' },
+		]);
+		const q = new Query<{ n: number }>({ runner, request: stmt('SELECT n') });
+		const [cols, rows] = await Promise.all([q.columns(), q.all()]);
+		assert.deepEqual(cols, [{ name: 'n' }]);
+		assert.deepEqual(rows, [{ n: 1 }, { n: 2 }]);
+		// Still a single runner.run() across both consumers.
+		assert.equal(log.calls, 1);
+	});
+
+	test('locked to FIRST rowset on multi-rowset queries — second rowset metadata is not exposed', async () => {
+		// `.columns()` describes the first rowset only. `.run()` (drain-
+		// only) is rowset-oblivious so it consumes both without throwing,
+		// but `.columns()` still returns just the first.
+		const { runner } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'first' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'metadata', columns: [{ name: 'second' }] },
+			{ kind: 'row', values: [2] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT first; SELECT second') });
+		const cols = await q.columns();
+		assert.deepEqual(cols, [{ name: 'first' }]);
+		// Drive the stream to completion via .run() (rowset-oblivious).
+		await q.run();
+		// Repeat call still resolves to the FIRST-rowset columns.
+		const colsAgain = await q.columns();
+		assert.deepEqual(colsAgain, [{ name: 'first' }]);
+	});
+
+	test('.run() after .columns() drains the lookahead and completes', async () => {
+		const { runner, log } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT n') });
+		await q.columns();
+		const meta = await q.run();
+		assert.equal(meta.completed, true);
+		assert.equal(meta.rowsAffected, 1);
+		assert.equal(log.calls, 1, 'no second runner.run()');
+	});
+
+	test('.dispose() after .columns() (paused shape pump) fires runner finally exactly once', async () => {
+		// Verifies the dispose-on-paused-shape-pump path: cancel() must
+		// call iter.return() on the runner iterator, which triggers the
+		// runner's try/finally and releases the underlying connection.
+		const { runner, log } = makeFakeRunner([
+			{ kind: 'metadata', columns: [{ name: 'n' }] },
+			{ kind: 'row', values: [1] },
+			{ kind: 'rowsetEnd', rowsAffected: 1 },
+			{ kind: 'done' },
+		]);
+		const q = new Query({ runner, request: stmt('SELECT n') });
+		await q.columns();
+		assert.equal(log.releases, 0, 'iter is paused after shape pump captures metadata');
+		await q.dispose();
+		assert.equal(log.releases, 1, 'dispose triggered iter.return → runner finally');
+	});
+});
+
 // ─── Query.cancel() / .dispose() — feature behaviour ────────────────────────
 
 describe('Query.cancel() / .dispose() — feature behaviour', () => {

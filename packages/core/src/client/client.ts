@@ -31,12 +31,13 @@ import type {
 	BindQueryable,
 	Pool,
 	PoolFactory,
+	PooledConnection,
 	Queryable,
 } from '../pool/index.js';
 import { singleConnection } from '../pool/index.js';
 import type { RequestRunner } from '../query/index.js';
 import { poolRunner } from '../query/pool-runner.js';
-import { makeSqlTag, type SqlTag } from '../sql/index.js';
+import { makePoolBoundSqlTag, type PoolBoundSqlTag } from '../sql/index.js';
 import type { ClientConfig } from './config.js';
 
 export type ClientState = 'pending' | 'open' | 'draining' | 'destroyed';
@@ -50,7 +51,7 @@ const queryableStub = {} as Queryable;
 const stubBindQueryable: BindQueryable = (_conn) => queryableStub;
 
 export class Client {
-	readonly sql: SqlTag;
+	readonly sql: PoolBoundSqlTag;
 
 	#state: ClientState = 'pending';
 	readonly #pool: Pool;
@@ -70,7 +71,7 @@ export class Client {
 			...(config.hooks !== undefined ? { hooks: config.hooks } : {}),
 			bindQueryable: stubBindQueryable,
 		});
-		this.sql = makeSqlTag(this.#runner());
+		this.sql = makePoolBoundSqlTag(this.#runner(), this.#acquire());
 	}
 
 	get state(): ClientState {
@@ -169,6 +170,26 @@ export class Client {
 					}
 				})();
 			},
+		};
+	}
+
+	// Pool-acquire wrapper used by `sql.acquire()`. Gates on the Client's
+	// state so `await sql.acquire()` rejects with the same lifecycle
+	// errors the tag would (per ADR-0018). The pool's own state-gating
+	// kicks in for `draining` / `destroyed` — no need to duplicate; we
+	// only handle the `pending` case (Client knows about it; pool does
+	// not, since it was opened by the Client's own connect()).
+	#acquire(): (signal?: AbortSignal) => Promise<PooledConnection> {
+		return async (signal?: AbortSignal): Promise<PooledConnection> => {
+			if (this.#state === 'pending') {
+				throw new ClientNotConnectedError();
+			}
+			if (this.#state !== 'open') {
+				throw new ClientClosedError(`client is ${this.#state}`, {
+					state: this.#state,
+				});
+			}
+			return this.#pool.acquire(signal);
 		};
 	}
 }

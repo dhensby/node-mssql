@@ -396,6 +396,185 @@ describe('tediousDriver — .columns() first-rowset shape access (integration)',
 	});
 });
 
+// ─── sql.unsafe — raw text escape hatch (integration) ──────────────────────
+//
+// End-to-end validation that `sql.unsafe(text, params?)` reaches the
+// driver and binds parameters identically to the tagged-template form.
+// The escape hatch is the integration point for query-builder output
+// (Kysely / Drizzle / etc.) — exercising it against a real server here.
+
+describe('tediousDriver — sql.unsafe (integration)', () => {
+	test('raw text passes through and rows return as expected', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const rows = await client.sql.unsafe<{ n: number }>('SELECT 1 AS n');
+			assert.deepEqual(rows, [{ n: 1 }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('object params bind by name', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const rows = await client.sql.unsafe<{ a: number; b: string }>(
+				'SELECT @id AS a, @name AS b',
+				{ id: 7, name: 'alice' },
+			);
+			assert.deepEqual(rows, [{ a: 7, b: 'alice' }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('array params bind positionally as @p0, @p1, …', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const rows = await client.sql.unsafe<{ a: number; b: string }>(
+				'SELECT @p0 AS a, @p1 AS b',
+				[42, 'hello'],
+			);
+			assert.deepEqual(rows, [{ a: 42, b: 'hello' }]);
+		} finally {
+			await client.close();
+		}
+	});
+});
+
+// ─── sql.acquire — pinned connection scope (integration) ───────────────────
+//
+// `sql.acquire()` reserves a pool connection for the lifetime of an
+// `await using` (or until explicit `.release()`). The pin makes
+// session-scoped state safe — temp tables created on the connection
+// persist across queries on the same `ReservedConn`, where pool-bound
+// queries can't make that guarantee.
+//
+// The acceptance test for "the connection is truly pinned" is a
+// `#temp` table — it's session-scoped on SQL Server, so its presence
+// across two queries on a `ReservedConn` proves they ran on the same
+// underlying connection.
+
+describe('tediousDriver — sql.acquire (integration)', () => {
+	test('two queries on the same ReservedConn run on the same SQL Server session', async () => {
+		// `@@SPID` is the session's SQL Server process id — same SPID
+		// across two queries proves they ran on the same connection.
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			await using conn = await client.sql.acquire();
+			const a = await conn<{ spid: number }>`SELECT @@SPID AS spid`;
+			const b = await conn<{ spid: number }>`SELECT @@SPID AS spid`;
+			assert.ok(a[0] !== undefined && b[0] !== undefined);
+			assert.equal(a[0]?.spid, b[0]?.spid, 'two queries shared one session');
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('session-scoped state (#temp tables) persists across queries on the same ReservedConn', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			await using conn = await client.sql.acquire();
+			// Create a temp table on the pinned connection and insert a row.
+			await conn`CREATE TABLE #items (id INT, name NVARCHAR(50))`.run();
+			await conn`INSERT INTO #items (id, name) VALUES (${1}, ${'alice'})`.run();
+			// Read it back — must be the SAME connection or #items is gone.
+			const rows = await conn<{ id: number; name: string }>`
+				SELECT id, name FROM #items
+			`;
+			assert.deepEqual(rows, [{ id: 1, name: 'alice' }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('release() returns the connection; pool-bound queries continue to work', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const conn = await client.sql.acquire();
+			await conn`SELECT 1`.run();
+			await conn.release();
+			// Pool-bound query after release — should succeed (the pool
+			// has a connection again).
+			const rows = await client.sql<{ n: number }>`SELECT 1 AS n`;
+			assert.deepEqual(rows, [{ n: 1 }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('queries after release() throw TypeError', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const conn = await client.sql.acquire();
+			await conn.release();
+			assert.throws(() => conn`SELECT 1`, TypeError);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('Promise.all on a ReservedConn serialises FIFO (no EREQINPROG)', async () => {
+		// Three queries fired concurrently on the same pinned connection.
+		// In v12 the second would error with EREQINPROG; in v13 they
+		// queue internally and resolve in order.
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			await using conn = await client.sql.acquire();
+			const [a, b, c] = await Promise.all([
+				conn<{ n: number }>`SELECT 1 AS n`,
+				conn<{ n: number }>`SELECT 2 AS n`,
+				conn<{ n: number }>`SELECT 3 AS n`,
+			]);
+			assert.deepEqual(a, [{ n: 1 }]);
+			assert.deepEqual(b, [{ n: 2 }]);
+			assert.deepEqual(c, [{ n: 3 }]);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('await using disposes the ReservedConn at scope exit', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			let captured: { released: boolean } | null = null;
+			{
+				await using conn = await client.sql.acquire();
+				await conn`SELECT 1`.run();
+				captured = conn;
+				assert.equal(conn.released, false);
+			}
+			// After scope exit, conn is released.
+			assert.equal(captured.released, true);
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('.unsafe() works on a ReservedConn too', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			await using conn = await client.sql.acquire();
+			const rows = await conn.unsafe<{ n: number }>(
+				'SELECT @x AS n',
+				{ x: 99 },
+			);
+			assert.deepEqual(rows, [{ n: 99 }]);
+		} finally {
+			await client.close();
+		}
+	});
+});
+
 // ─── .rowsets() — multi-rowset terminal (integration) ─────────────────────
 //
 // End-to-end validation of the `Rowsets<Tuple>` two-form contract

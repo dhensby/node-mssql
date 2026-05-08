@@ -73,7 +73,26 @@ export class TediousConnectionWrapper
 			request.addParameter(name, inferred.type, inferred.value);
 		}
 
-		conn.execSql(request);
+		// Dispatch on whether the request has parameters:
+		// - No params: send as a plain TDS batch via `execSqlBatch`.
+		//   This preserves session-scoped state (temp tables, `SET`
+		//   options) for callers that pin a connection via `sql.acquire`
+		//   or a transaction. `execSql` (the parameterised path) wraps
+		//   the statement in `sp_executesql`, which gives the inner
+		//   statements their own batch scope — temp tables created
+		//   inside don't survive the call (ADR-0006's pinned-scope
+		//   contract relies on this distinction).
+		// - With params: `execSql` uses `sp_executesql` for the
+		//   parameter binding + plan-cache benefits. Parameter-less
+		//   DDL inside `sp_executesql` would still be scope-trapped,
+		//   but a parameter-bound statement inherently doesn't carry
+		//   session-scoped artefacts past its boundary anyway, so the
+		//   sp_executesql wrapper is the right call.
+		if (params.length === 0) {
+			conn.execSqlBatch(request);
+		} else {
+			conn.execSql(request);
+		}
 
 		// `events.on` handles the queue, backpressure (via the bridge's
 		// `pause` / `resume`), the AbortSignal, and natural termination

@@ -1,31 +1,44 @@
 /**
  * `Client` and `createClient` (ADR-0018).
  *
- * Vertical-slice cut: the lifecycle gates (`pending` → `open` → `draining`
- * → `destroyed`), the bound `sql` tag, and the synchronous-construct /
- * async-connect / async-close / async-destroy methods. Round-out commits
- * extend the surface to:
+ * Round-out cut R-7: adds the `EventEmitter` surface and the
+ * `mssql:client:state-change` diagnostics_channel emission per
+ * ADR-0014 / ADR-0018. Earlier round-outs added the lifecycle gates
+ * (`pending` → `open` → `draining` → `destroyed`), the bound `sql`
+ * tag, and the `defaultIsolationLevel` threading. Future round-outs
+ * extend further:
  *
  * - `client.id` (ADR-0016 — id generator threaded from `ClientConfig`)
- * - `EventEmitter<{ close: ... }>` per-instance close event (ADR-0018)
- * - `mssql:client:state-change` diagnostics_channel publish (ADR-0014)
- * - `defaultTimeout` / `defaultIsolationLevel` threading (ADR-0013 / ADR-0006)
+ * - `defaultTimeout` (ADR-0013)
  * - `errorOnInfo` predicate plumbing (ADR-0007)
- * - `client.acquire()` / `client.transaction()` scope builders (ADR-0006)
  *
- * The state-machine semantics here match ADR-0018:
- * - `connect()` is required and async; rejection transitions to
- *   `'destroyed'` (terminal — retry by constructing a new client).
- * - `close()` is graceful drain; new acquires reject, queued continue.
- * - `destroy()` is force-close; in-flight aborts, queued waiters reject.
- * - Repeat calls to `connect()` / `close()` / `destroy()` return the same
- *   Promise as the first call (idempotency via stored Promises).
+ * Event + channel ordering on the terminal (`→ destroyed`)
+ * transition is deterministic per ADR-0018, "Client events":
+ *
+ * 1. `#state` is mutated synchronously (a `close`-event handler
+ *    reading `client.state` sees `'destroyed'`).
+ * 2. The `'close'` event fires synchronously
+ *    (`{ reason, error? }`) for per-instance subscribers.
+ * 3. `mssql:client:state-change` publishes `{ from, to }` for
+ *    cross-cutting telemetry subscribers.
+ * 4. The originating `connect()` / `close()` / `destroy()` Promise
+ *    settles last.
+ *
+ * The two observability surfaces serve different audiences. The
+ * `'close'` event is per-instance, for code holding a Client
+ * reference (`client.once('close', cleanup)`). The channel is
+ * process-wide telemetry covering every Client and every transition
+ * (including non-terminal ones); APM tools subscribe to it without
+ * needing references to specific Client instances.
  */
 
+import { EventEmitter } from 'node:events';
+import { clientStateChangeChannel } from '../diagnostics/index.js';
 import type { ExecuteRequest, ResultEvent } from '../driver/index.js';
 import {
 	ClientClosedError,
 	ClientNotConnectedError,
+	type MssqlError,
 } from '../errors/index.js';
 import type {
 	BindQueryable,
@@ -39,8 +52,45 @@ import type { RequestRunner } from '../query/index.js';
 import { poolRunner } from '../query/pool-runner.js';
 import { makePoolBoundSqlTag, type PoolBoundSqlTag } from '../sql/index.js';
 import type { ClientConfig } from './config.js';
+import type { ClientState } from './state.js';
 
-export type ClientState = 'pending' | 'open' | 'draining' | 'destroyed';
+export type { ClientState };
+
+/**
+ * Discriminator for the `'close'` event's cause. The same Client
+ * cannot fire `'close'` more than once (terminal transition), so the
+ * three reasons are mutually exclusive for a given Client lifetime.
+ */
+export type ClientCloseReason = 'connect-failure' | 'drain' | 'destroy';
+
+/**
+ * Payload for the {@link Client}'s `'close'` event.
+ *
+ * `error` is set ONLY for `reason: 'connect-failure'` — it carries
+ * the `ConnectionError` / `CredentialError` that rejected the
+ * originating `connect()`. For `'drain'` and `'destroy'` reasons,
+ * `error` is `undefined`.
+ */
+export interface ClientClosePayload {
+	readonly reason: ClientCloseReason
+	readonly error?: MssqlError
+}
+
+/**
+ * The typed event surface on {@link Client}. One event —  `'close'` —
+ * fires once per Client lifetime when the Client transitions to
+ * `'destroyed'`. No `'error'` event: connect failures arrive on the
+ * `connect()` Promise rejection AND on `close({ reason: 'connect-failure', error })`,
+ * and a runtime error during a query reaches the consumer's
+ * `await` on the terminal — `EventEmitter` is not involved.
+ *
+ * Cross-cutting transition observability lives on the
+ * `mssql:client:state-change` `diagnostics_channel`; per-instance
+ * close handling is here.
+ */
+export interface ClientEvents {
+	close: [ClientClosePayload]
+}
 
 // `Queryable` is currently a brand-only placeholder ([ADR-0011] /
 // [ADR-0006] — the real shape lands when scope-builders ship). Hooks
@@ -50,7 +100,7 @@ export type ClientState = 'pending' | 'open' | 'draining' | 'destroyed';
 const queryableStub = {} as Queryable;
 const stubBindQueryable: BindQueryable = (_conn) => queryableStub;
 
-export class Client {
+export class Client extends EventEmitter<ClientEvents> {
 	readonly sql: PoolBoundSqlTag;
 
 	#state: ClientState = 'pending';
@@ -61,6 +111,7 @@ export class Client {
 	#destroyPromise: Promise<void> | null = null;
 
 	constructor(config: ClientConfig) {
+		super();
 		const factory: PoolFactory = config.pool ?? singleConnection();
 		this.#pool = factory({
 			driver: config.driver,
@@ -101,17 +152,20 @@ export class Client {
 		if (this.#closePromise !== null) return this.#closePromise;
 		if (this.#state === 'destroyed') return Promise.resolve();
 		if (this.#state === 'pending') {
-			// Never connected; nothing to drain. Transition straight to destroyed.
-			this.#state = 'destroyed';
+			// Never connected; nothing to drain. Transition straight to
+			// destroyed — fires `'close'` with `reason: 'drain'` (close()
+			// is the graceful-shutdown verb regardless of what was
+			// in-flight).
+			this.#transitionTo('destroyed', { reason: 'drain' });
 			return Promise.resolve();
 		}
 		// `open` → `draining`. Wait for pool drain, then `destroyed`.
-		this.#state = 'draining';
+		this.#transitionTo('draining');
 		this.#closePromise = (async () => {
 			try {
 				await this.#pool.drain();
 			} finally {
-				this.#state = 'destroyed';
+				this.#transitionTo('destroyed', { reason: 'drain' });
 			}
 		})();
 		return this.#closePromise;
@@ -119,9 +173,16 @@ export class Client {
 
 	destroy(): Promise<void> {
 		if (this.#destroyPromise !== null) return this.#destroyPromise;
-		// Force-close from any state. Concurrent close()'s pool.drain() will
-		// be unblocked by pool.destroy().
-		this.#state = 'destroyed';
+		// Force-close from any state. Concurrent close()'s pool.drain()
+		// will be unblocked by pool.destroy().
+		// State transitions to `'destroyed'` BEFORE the async pool
+		// teardown — matches ADR-0018's ordering ("state changes
+		// synchronously, close event fires synchronously, channel
+		// publishes, Promise settles last").
+		const wasAlreadyDestroyed = this.#state === 'destroyed';
+		if (!wasAlreadyDestroyed) {
+			this.#transitionTo('destroyed', { reason: 'destroy' });
+		}
 		this.#destroyPromise = (async () => {
 			await this.#pool.destroy();
 		})();
@@ -135,14 +196,57 @@ export class Client {
 		// bootstrap call site (ADR-0018).
 		try {
 			await using _pooled = await this.#pool.acquire();
-			this.#state = 'open';
+			this.#transitionTo('open');
 		} catch (err) {
 			// Rejected connect transitions to `'destroyed'` — retry by
-			// constructing a new Client (ADR-0018, "Retrying after a failed
-			// connect").
-			this.#state = 'destroyed';
+			// constructing a new Client (ADR-0018, "Retrying after a
+			// failed connect"). Fires `'close'` with
+			// `reason: 'connect-failure'` and the originating error so
+			// per-instance lifecycle subscribers can react without
+			// catching the `connect()` Promise themselves.
+			this.#transitionTo('destroyed', {
+				reason: 'connect-failure',
+				error: err as MssqlError,
+			});
 			throw err;
 		}
+	}
+
+	// Single transition primitive — every state mutation goes through
+	// here so the ADR-0018 ordering (state → close event → channel →
+	// Promise) is centralised and impossible to forget at a callsite.
+	//
+	// Same-state transitions are silently dropped. The Client's own
+	// callers never request a no-op transition, but the guard means
+	// repeated `destroy()` / `close()` paths that re-enter via stored
+	// Promises don't double-fire.
+	#transitionTo(
+		to: ClientState,
+		closeOpts?: { reason: ClientCloseReason; error?: MssqlError },
+	): void {
+		const from = this.#state;
+		if (from === to) return;
+		// 1. State first — a `'close'` handler reading `client.state`
+		//    must see the new value.
+		this.#state = to;
+		// 2. `'close'` event for terminal-only transitions. There's no
+		//    `'error'` event by design (ADR-0018) — connect failures
+		//    arrive on the `connect()` Promise rejection AND on
+		//    `close({ reason: 'connect-failure', error })` for
+		//    per-instance subscribers wanting both surfaces.
+		if (to === 'destroyed' && closeOpts !== undefined) {
+			// `error?: undefined` is preferred over present-with-undefined
+			// in the emitted payload — keep it absent when not set.
+			const payload: ClientClosePayload = closeOpts.error !== undefined
+				? { reason: closeOpts.reason, error: closeOpts.error }
+				: { reason: closeOpts.reason };
+			this.emit('close', payload);
+		}
+		// 3. Diagnostics channel for cross-cutting subscribers. Always
+		//    publishes (including non-terminal transitions like
+		//    `pending → open`, `open → draining`) so APM lifecycle
+		//    timelines see every state change.
+		clientStateChangeChannel.publish({ from, to });
 	}
 
 	// The runner the bound `sql` tag uses. Wraps the pool-bound runner

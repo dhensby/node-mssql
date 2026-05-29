@@ -227,21 +227,43 @@ describe('EventBridge — backpressure', () => {
 			close: ['end'],
 		}) as AsyncIterableIterator<[ResultEvent]>;
 
-		// Fire 10 rows with no consumer pull yet → backpressure should kick
-		// in once the buffer hits 3.
+		// Fire metadata + 10 rows with no consumer pull yet → backpressure
+		// kicks in once the buffer exceeds the high-water mark.
+		//
+		// Crucially we do NOT fire `done` / `requestCompleted` (→ `'end'`)
+		// yet. Once the source signals completion, `events.on()` switches
+		// to drain-and-close mode and stops calling `resume()` — there's
+		// nothing left to resume. Observing resume therefore requires the
+		// source to still be live while the consumer drains below the
+		// low-water mark. Firing `'end'` up front (as an earlier version
+		// of this test did) made the resume assertion racy: under load the
+		// close was processed before the drain, so resume was never called.
 		request.fireMetadata([{ colName: 'n' }]);
 		for (let i = 0; i < 10; i++) {
 			request.fireRow([i]);
 		}
-		request.fireDone(10);
-		request.fireRequestCompleted();
 
 		assert.ok(request.paused >= 1, 'pause was called once watermark hit');
 
-		// Consume — should drain and yield resume at some point.
-		const events = await collect(iter);
-		assert.equal(events.filter((e) => e.kind === 'row').length, 10);
+		// Drain the 11 buffered events (1 metadata + 10 rows) one at a time
+		// while the source is still live. Pulling exactly the buffered count
+		// avoids a 12th `next()` that would block waiting for more events.
+		// By the time the buffer empties, it has crossed below the low-water
+		// mark, so `events.on` has called `resume()`.
+		const seen: ResultEvent[] = [];
+		for (let i = 0; i < 11; i++) {
+			const { value } = await iter.next();
+			if (value !== undefined) seen.push(value[0]);
+		}
 		assert.ok(request.resumed >= 1, 'resume was called as the consumer drained');
+
+		// Now end the stream and let the iterator close on `'end'`.
+		request.fireDone(10);
+		request.fireRequestCompleted();
+		const rest = await collect(iter);
+
+		const allEvents = [...seen, ...rest];
+		assert.equal(allEvents.filter((e) => e.kind === 'row').length, 10);
 	});
 });
 

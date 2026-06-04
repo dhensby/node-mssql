@@ -14,6 +14,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
 	ConnectionError,
 	ConstraintError,
@@ -378,7 +379,7 @@ describe('tediousDriver — .columns() first-rowset shape access (integration)',
 			const q = client.sql`WAITFOR DELAY '00:00:10'; SELECT 1 AS n`;
 			const colsPromise = q.columns();
 			// Yield to let the shape pump kick the request off.
-			await new Promise((r) => setTimeout(r, 50));
+			await delay(50);
 			await q.dispose();
 			// The columns promise rejects (cancelled before metadata).
 			await assert.rejects(() => colsPromise);
@@ -598,7 +599,7 @@ describe('tediousDriver — sql.acquire (integration)', () => {
 			const closePromise = client.close().then(() => order.push('close-resolved'));
 
 			// Give close() a generous window to (incorrectly) resolve early.
-			await new Promise((r) => setTimeout(r, 50));
+			await delay(50);
 			assert.equal(
 				client.state,
 				'draining',
@@ -1170,7 +1171,7 @@ describe('tediousDriver — cancel-then-settle ordering (integration)', () => {
 			})();
 
 			// Yield to let the server start the WAITFOR.
-			await new Promise((r) => setTimeout(r, 50));
+			await delay(50);
 
 			// Cancel — must return only after tedious has settled the
 			// cancel-ack and the connection is back in the pool. If
@@ -1202,7 +1203,7 @@ describe('tediousDriver — cancel-then-settle ordering (integration)', () => {
 					} catch { /* expected */ }
 				})();
 
-				await new Promise((r) => setTimeout(r, 50));
+				await delay(50);
 				// Falling off the block cancels via Symbol.asyncDispose.
 				void consumer;
 			}

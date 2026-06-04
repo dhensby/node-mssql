@@ -1,5 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { setImmediate } from 'node:timers/promises';
 import { EventEmitter, on } from 'node:events';
 import type { Request as TediousRequest } from 'tedious';
 import type { ResultEvent } from '@tediousjs/mssql-core';
@@ -306,7 +307,7 @@ describe('EventBridge — cancel-then-settle ordering (regression)', () => {
 		// Yield enough to let any synchronous / microtask resolution land.
 		// `setImmediate` runs after all queued microtasks for this turn
 		// (and after any setTimeout(0) that's already been queued).
-		await new Promise((r) => setImmediate(r));
+		await setImmediate();
 
 		// Without the await-settle fix, destroy returned synchronously
 		// (it just initiated cancel + removed listeners), so destroyResolved

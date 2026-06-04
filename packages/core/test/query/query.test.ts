@@ -1,5 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { setImmediate } from 'node:timers/promises';
 import {
 	type EnvChange,
 	type ExecuteRequest,
@@ -632,7 +633,7 @@ describe('Query — cancel-then-settle ordering (regression)', () => {
 
 		// Yield enough turns for the runner to start and the consumer to
 		// be parked.
-		await new Promise((r) => setImmediate(r));
+		await setImmediate();
 
 		// Start the cancel — it MUST not resolve until the runner stream
 		// has fully terminated (the `runner-finally` log entry).
@@ -643,7 +644,7 @@ describe('Query — cancel-then-settle ordering (regression)', () => {
 		});
 
 		// Yield turns to let any sync/microtask resolution fire.
-		await new Promise((r) => setImmediate(r));
+		await setImmediate();
 
 		// At this point the runner's abort handler has fired but cleanup
 		// hasn't completed (we control `triggerCleanup`). If cancel()
@@ -1147,7 +1148,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		const colsPromise = q.columns();
 		// Yield to let the shape pump start.
-		await new Promise((r) => setImmediate(r));
+		await setImmediate();
 		await q.dispose();
 		await assert.rejects(() => colsPromise);
 	});
@@ -1166,7 +1167,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 		};
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		const colsPromise = q.columns();
-		await new Promise((r) => setImmediate(r));
+		await setImmediate();
 		await q.cancel();
 		await assert.rejects(() => colsPromise);
 	});
@@ -1332,7 +1333,7 @@ describe('Query.cancel() / .dispose() — feature behaviour', () => {
 			}
 		})();
 		// Yield until the consumer is parked.
-		await new Promise((r) => setImmediate(r));
+		await setImmediate();
 		await q.cancel();
 		assert.equal(await consumer, 'aborted');
 	});
@@ -1360,7 +1361,7 @@ describe('Query.cancel() / .dispose() — feature behaviour', () => {
 				for await (const _ of q.iterate()) { /* */ }
 			} catch { /* expected */ }
 		})();
-		await new Promise((r) => setImmediate(r));
+		await setImmediate();
 		await q.cancel();
 		await consumer;
 		const meta = q.meta();

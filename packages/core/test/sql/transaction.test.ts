@@ -11,6 +11,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { setImmediate } from 'node:timers/promises';
 import {
 	type IsolationLevel,
 	type Savepoint,
@@ -523,7 +524,7 @@ describe('Transaction — settling with open savepoints', () => {
 
 // Drain the microtask queue (one macrotask boundary) — lets every settled
 // promise that *can* progress do so, so "did NOT run" assertions are sound.
-const drain = (): Promise<void> => new Promise<void>((res) => { setImmediate(res); });
+const drain = (): Promise<void> => setImmediate();
 
 describe('Transaction — concurrency safety', () => {
 	test('parallel commit() calls issue exactly one COMMIT', async () => {

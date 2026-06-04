@@ -39,6 +39,7 @@ import {
 	ClientClosedError,
 	ClientNotConnectedError,
 	type MssqlError,
+	type PoolClosedState,
 } from '../errors/index.js';
 import type {
 	BindQueryable,
@@ -51,6 +52,7 @@ import { singleConnection } from '../pool/index.js';
 import type { RequestRunner } from '../query/index.js';
 import { poolRunner } from '../query/pool-runner.js';
 import { makePoolBoundSqlTag, type PoolBoundSqlTag } from '../sql/index.js';
+import { createStateMachine, onceAsync } from '../util/index.js';
 import type { ClientConfig } from './config.js';
 import type { ClientState } from './state.js';
 
@@ -103,12 +105,39 @@ const stubBindQueryable: BindQueryable = (_conn) => queryableStub;
 export class Client extends EventEmitter<ClientEvents> {
 	readonly sql: PoolBoundSqlTag;
 
-	#state: ClientState = 'pending';
 	readonly #pool: Pool;
 
-	#connectPromise: Promise<void> | null = null;
-	#closePromise: Promise<void> | null = null;
-	#destroyPromise: Promise<void> | null = null;
+	// State + transition seam (ADR-0024 §3). `onTransition` is the single
+	// place the `'close'` event and `state-change` channel fire — see
+	// `#onTransition`. The graph is non-linear (`destroyed` is reachable
+	// from every other state).
+	readonly #sm = createStateMachine<ClientState>({
+		initial: 'pending',
+		transitions: {
+			pending: ['open', 'destroyed'],
+			open: ['draining', 'destroyed'],
+			draining: ['destroyed'],
+			destroyed: [],
+		},
+		onTransition: (from, to) => { this.#onTransition(from, to); },
+	});
+
+	// Settle-once memoisation (ADR-0024 §4) for each lifecycle verb: every
+	// caller of a verb shares the one in-flight promise.
+	readonly #connectOnce = onceAsync((): Promise<void> => this.#performConnect());
+	readonly #closeOnce = onceAsync((): Promise<void> => this.#drain());
+	readonly #destroyOnce = onceAsync((): Promise<void> => this.#forceDestroy());
+
+	// `true` once `destroy()` has been requested — routes a concurrent or
+	// later `close()` to await the (superseding) force-teardown instead of
+	// resolving early. A routing signal, not an idempotency flag: the
+	// settlement itself is `#destroyOnce`.
+	#destroying = false;
+
+	// The `'close'` payload to emit on the NEXT `→ destroyed` transition.
+	// Set synchronously by `#transitionTo` right before the transition, so
+	// the reason rides the edge (ADR-0024 §1) rather than living in state.
+	#closeOnDestroy: ClientClosePayload | undefined;
 
 	constructor(config: ClientConfig) {
 		super();
@@ -130,28 +159,26 @@ export class Client extends EventEmitter<ClientEvents> {
 	}
 
 	get state(): ClientState {
-		return this.#state;
+		return this.#sm.state;
 	}
 
 	connect(): Promise<void> {
-		if (this.#connectPromise !== null) return this.#connectPromise;
-		if (this.#state === 'open') return Promise.resolve();
-		if (this.#state !== 'pending') {
-			return Promise.reject(
-				new ClientClosedError(`client is ${this.#state}`, {
-					state: this.#state,
-				}),
-			);
-		}
-		this.#connectPromise = this.#performConnect();
-		return this.#connectPromise;
+		if (this.#sm.is('open')) return Promise.resolve();
+		if (this.#sm.is('pending')) return this.#connectOnce();
+		// Closed (draining | destroyed). The `is()` guards gate the conditions
+		// but don't narrow `#sm.state`, so assert the closed-state type for the
+		// error payload.
+		const state = this.#sm.state;
+		return Promise.reject(new ClientClosedError(`client is ${state}`, { state: state as PoolClosedState }));
 	}
 
 	close(): Promise<void> {
-		if (this.#destroyPromise !== null) return this.#destroyPromise;
-		if (this.#closePromise !== null) return this.#closePromise;
-		if (this.#state === 'destroyed') return Promise.resolve();
-		if (this.#state === 'pending') {
+		// A requested destroy supersedes a graceful close — await the
+		// force-teardown rather than resolve early (ADR-0024 §4: no caller
+		// observes "done" before the work has settled).
+		if (this.#destroying) return this.#destroyOnce();
+		if (this.#sm.is('destroyed')) return Promise.resolve();
+		if (this.#sm.is('pending')) {
 			// Never connected; nothing to drain. Transition straight to
 			// destroyed — fires `'close'` with `reason: 'drain'` (close()
 			// is the graceful-shutdown verb regardless of what was
@@ -159,34 +186,12 @@ export class Client extends EventEmitter<ClientEvents> {
 			this.#transitionTo('destroyed', { reason: 'drain' });
 			return Promise.resolve();
 		}
-		// `open` → `draining`. Wait for pool drain, then `destroyed`.
-		this.#transitionTo('draining');
-		this.#closePromise = (async () => {
-			try {
-				await this.#pool.drain();
-			} finally {
-				this.#transitionTo('destroyed', { reason: 'drain' });
-			}
-		})();
-		return this.#closePromise;
+		return this.#closeOnce();
 	}
 
 	destroy(): Promise<void> {
-		if (this.#destroyPromise !== null) return this.#destroyPromise;
-		// Force-close from any state. Concurrent close()'s pool.drain()
-		// will be unblocked by pool.destroy().
-		// State transitions to `'destroyed'` BEFORE the async pool
-		// teardown — matches ADR-0018's ordering ("state changes
-		// synchronously, close event fires synchronously, channel
-		// publishes, Promise settles last").
-		const wasAlreadyDestroyed = this.#state === 'destroyed';
-		if (!wasAlreadyDestroyed) {
-			this.#transitionTo('destroyed', { reason: 'destroy' });
-		}
-		this.#destroyPromise = (async () => {
-			await this.#pool.destroy();
-		})();
-		return this.#destroyPromise;
+		this.#destroying = true;
+		return this.#destroyOnce();
 	}
 
 	async #performConnect(): Promise<void> {
@@ -212,40 +217,63 @@ export class Client extends EventEmitter<ClientEvents> {
 		}
 	}
 
-	// Single transition primitive — every state mutation goes through
-	// here so the ADR-0018 ordering (state → close event → channel →
-	// Promise) is centralised and impossible to forget at a callsite.
-	//
-	// Same-state transitions are silently dropped. The Client's own
-	// callers never request a no-op transition, but the guard means
-	// repeated `destroy()` / `close()` paths that re-enter via stored
-	// Promises don't double-fire.
+	// `close()`'s settle op: graceful drain. `open → draining`, wait for
+	// in-flight holders to release, then `→ destroyed` (`reason: 'drain'`).
+	async #drain(): Promise<void> {
+		this.#transitionTo('draining');
+		try {
+			await this.#pool.drain();
+		} finally {
+			this.#transitionTo('destroyed', { reason: 'drain' });
+		}
+	}
+
+	// `destroy()`'s settle op: force-teardown from any state. State flips
+	// to `destroyed` synchronously BEFORE the async pool teardown
+	// (ADR-0018 ordering); a concurrent `close()`'s `pool.drain()` is
+	// unblocked by `pool.destroy()`. If `close()` already reached
+	// `destroyed`, the transition is a no-op and only `pool.destroy()` runs.
+	async #forceDestroy(): Promise<void> {
+		if (!this.#sm.is('destroyed')) {
+			this.#transitionTo('destroyed', { reason: 'destroy' });
+		}
+		await this.#pool.destroy();
+	}
+
+	// Thread the `'close'` reason onto the edge (ADR-0024 §1), then perform
+	// the transition. The state machine drops same-state no-ops and runs
+	// `#onTransition` for real transitions, so the ordering below is
+	// centralised and impossible to forget at a callsite.
 	#transitionTo(
 		to: ClientState,
 		closeOpts?: { reason: ClientCloseReason; error?: MssqlError },
 	): void {
-		const from = this.#state;
-		if (from === to) return;
-		// 1. State first — a `'close'` handler reading `client.state`
-		//    must see the new value.
-		this.#state = to;
-		// 2. `'close'` event for terminal-only transitions. There's no
-		//    `'error'` event by design (ADR-0018) — connect failures
-		//    arrive on the `connect()` Promise rejection AND on
-		//    `close({ reason: 'connect-failure', error })` for
-		//    per-instance subscribers wanting both surfaces.
-		if (to === 'destroyed' && closeOpts !== undefined) {
-			// `error?: undefined` is preferred over present-with-undefined
-			// in the emitted payload — keep it absent when not set.
-			const payload: ClientClosePayload = closeOpts.error !== undefined
+		// `error?: undefined` is preferred over present-with-undefined in
+		// the emitted payload — keep it absent when not set.
+		this.#closeOnDestroy = closeOpts === undefined
+			? undefined
+			: closeOpts.error !== undefined
 				? { reason: closeOpts.reason, error: closeOpts.error }
 				: { reason: closeOpts.reason };
-			this.emit('close', payload);
+		this.#sm.to(to);
+	}
+
+	// The single transition side-effect seam (ADR-0024 §3), run by the
+	// state machine AFTER `state` has mutated — a `'close'` handler reading
+	// `client.state` sees the new value. Ordering per ADR-0018: state
+	// (already done) → `'close'` event → `state-change` channel → the
+	// originating Promise settles last.
+	#onTransition(from: ClientState, to: ClientState): void {
+		// `'close'` fires only on the terminal transition, and only when a
+		// reason was supplied. There's no `'error'` event by design
+		// (ADR-0018) — connect failures arrive on the `connect()` Promise
+		// rejection AND on `close({ reason: 'connect-failure', error })`.
+		if (to === 'destroyed' && this.#closeOnDestroy !== undefined) {
+			this.emit('close', this.#closeOnDestroy);
 		}
-		// 3. Diagnostics channel for cross-cutting subscribers. Always
-		//    publishes (including non-terminal transitions like
-		//    `pending → open`, `open → draining`) so APM lifecycle
-		//    timelines see every state change.
+		// Channel always publishes (including non-terminal transitions like
+		// `pending → open`, `open → draining`) so APM lifecycle timelines
+		// see every state change.
 		clientStateChangeChannel.publish({ from, to });
 	}
 
@@ -255,23 +283,21 @@ export class Client extends EventEmitter<ClientEvents> {
 	// - `draining` / `destroyed` → ClientClosedError
 	// - `open` → delegate to poolRunner
 	//
-	// Closure over an arrow function (not `const self = this`) so the
-	// generator's `state` reflects the current value on each `run()`
-	// call rather than the construction-time snapshot.
+	// Capture the state machine (not `const self = this`, not a snapshot) so
+	// each `run()` reads the current state through `is()` rather than a
+	// construction-time value.
 	#runner(): RequestRunner {
 		const inner = poolRunner(this.#pool);
-		const getState = (): ClientState => this.#state;
+		const sm = this.#sm;
 		return {
 			run(req: ExecuteRequest, signal?: AbortSignal): AsyncIterable<ResultEvent> {
 				return (async function* () {
-					const state = getState();
-					if (state === 'pending') {
+					if (sm.is('pending')) {
 						throw new ClientNotConnectedError();
 					}
-					if (state !== 'open') {
-						// At this point `state` narrows to `'draining' | 'destroyed'`,
-						// matching `PoolClosedState`.
-						throw new ClientClosedError(`client is ${state}`, { state });
+					if (!sm.is('open')) {
+						const state = sm.state;
+						throw new ClientClosedError(`client is ${state}`, { state: state as PoolClosedState });
 					}
 					for await (const event of inner.run(req, signal)) {
 						yield event;
@@ -289,13 +315,12 @@ export class Client extends EventEmitter<ClientEvents> {
 	// not, since it was opened by the Client's own connect()).
 	#acquire(): (signal?: AbortSignal) => Promise<PooledConnection> {
 		return async (signal?: AbortSignal): Promise<PooledConnection> => {
-			if (this.#state === 'pending') {
+			if (this.#sm.is('pending')) {
 				throw new ClientNotConnectedError();
 			}
-			if (this.#state !== 'open') {
-				throw new ClientClosedError(`client is ${this.#state}`, {
-					state: this.#state,
-				});
+			if (!this.#sm.is('open')) {
+				const state = this.#sm.state;
+				throw new ClientClosedError(`client is ${state}`, { state: state as PoolClosedState });
 			}
 			return this.#pool.acquire(signal);
 		};

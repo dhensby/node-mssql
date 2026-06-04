@@ -14,7 +14,13 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createClient } from '@tediousjs/mssql-core';
+import {
+	ConnectionError,
+	ConstraintError,
+	CredentialError,
+	createClient,
+	QueryError,
+} from '@tediousjs/mssql-core';
 import { tediousDriver } from '../src/index.js';
 import { type IntegrationConfig, requireIntegrationConfig } from './integration.js';
 
@@ -54,7 +60,7 @@ describe('tediousDriver — connection lifecycle (integration)', () => {
 		assert.equal(client.state, 'destroyed');
 	});
 
-	test('connect() with bad credentials surfaces ConnectionError', async () => {
+	test('connect() with bad credentials surfaces CredentialError', async () => {
 		const config = requireIntegrationConfig();
 		const client = createClient({
 			driver: tediousDriver(),
@@ -68,7 +74,10 @@ describe('tediousDriver — connection lifecycle (integration)', () => {
 		await assert.rejects(
 			() => client.connect(),
 			(err: unknown) => {
-				assert.ok(err instanceof Error);
+				assert.ok(err instanceof CredentialError, 'login failure → CredentialError');
+				assert.ok(err instanceof ConnectionError, 'CredentialError is-a ConnectionError');
+				assert.ok(err.cause instanceof Error, 'native tedious error preserved on cause');
+				assert.equal(typeof err.connectionId, 'string', 'connect failure carries connectionId');
 				return true;
 			},
 		);
@@ -1202,6 +1211,90 @@ describe('tediousDriver — cancel-then-settle ordering (integration)', () => {
 			const rows = await client.sql<{ n: number }>`SELECT 2 AS n`;
 			assert.deepEqual(rows, [{ n: 2 }]);
 			assert.ok(scopeExited);
+		} finally {
+			await client.close();
+		}
+	});
+});
+
+// ─── Error taxonomy (integration) ──────────────────────────────────────────
+//
+// Real SQL Server errors round-trip through tedious's `RequestError` and
+// the driver's translation layer (ADR-0017): the assertions here confirm
+// the live error shapes (`.number`, message text) match what `errors.ts`
+// maps on — duplicate keys → `ConstraintError`, FK violations → kind
+// `foreignKey`, plain rejections → `QueryError`.
+
+describe('tediousDriver — error taxonomy (integration)', () => {
+	test('duplicate key → ConstraintError, kind "unique", number 2627', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const t = `dbo.t_${Math.random().toString(36).slice(2, 10)}`;
+			await client.sql.unsafe(`CREATE TABLE ${t} (id INT CONSTRAINT pk_${t.slice(4)} PRIMARY KEY)`).run();
+			try {
+				await client.sql.unsafe(`INSERT INTO ${t} (id) VALUES (1)`).run();
+				await assert.rejects(
+					() => client.sql.unsafe(`INSERT INTO ${t} (id) VALUES (1)`).run(),
+					(err: unknown) => {
+						assert.ok(err instanceof ConstraintError, 'duplicate key → ConstraintError');
+						assert.equal(err.kind, 'unique');
+						assert.equal(err.number, 2627);
+						assert.ok(err.cause instanceof Error, 'native RequestError on cause');
+						return true;
+					},
+				);
+			} finally {
+				await client.sql.unsafe(`DROP TABLE ${t}`).run();
+			}
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('FK violation → ConstraintError, kind "foreignKey", number 547', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			const suffix = Math.random().toString(36).slice(2, 10);
+			const parent = `dbo.p_${suffix}`;
+			const child = `dbo.c_${suffix}`;
+			await client.sql.unsafe(`CREATE TABLE ${parent} (id INT PRIMARY KEY)`).run();
+			await client.sql.unsafe(
+				`CREATE TABLE ${child} (id INT, parent_id INT CONSTRAINT fk_${suffix} REFERENCES ${parent}(id))`,
+			).run();
+			try {
+				await assert.rejects(
+					() => client.sql.unsafe(`INSERT INTO ${child} (id, parent_id) VALUES (1, 999)`).run(),
+					(err: unknown) => {
+						assert.ok(err instanceof ConstraintError, 'FK violation → ConstraintError');
+						assert.equal(err.kind, 'foreignKey');
+						assert.equal(err.number, 547);
+						return true;
+					},
+				);
+			} finally {
+				await client.sql.unsafe(`DROP TABLE ${child}`).run();
+				await client.sql.unsafe(`DROP TABLE ${parent}`).run();
+			}
+		} finally {
+			await client.close();
+		}
+	});
+
+	test('invalid object name → QueryError (not a ConstraintError)', async () => {
+		const client = makeClient(requireIntegrationConfig());
+		await client.connect();
+		try {
+			await assert.rejects(
+				() => client.sql.unsafe('SELECT * FROM dbo.this_table_does_not_exist_xyz').run(),
+				(err: unknown) => {
+					assert.ok(err instanceof QueryError, 'server rejection → QueryError');
+					assert.ok(!(err instanceof ConstraintError), 'not a ConstraintError');
+					assert.equal(err.number, 208, 'invalid object name is T-SQL 208');
+					return true;
+				},
+			);
 		} finally {
 			await client.close();
 		}

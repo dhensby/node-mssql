@@ -44,6 +44,7 @@ import type { Connection, IsolationLevel } from '../driver/index.js';
 import { savepointName } from '../ids/index.js';
 import type { PooledConnection } from '../pool/index.js';
 import type { Query } from '../query/index.js';
+import { createStateMachine } from '../util/index.js';
 import { pinnedConnection } from './reserved-conn.js';
 import { makeSqlTag, type SqlTag, type UnsafeParams } from './tag.js';
 
@@ -154,7 +155,17 @@ export function makeTransaction(
 	exclusive: Exclusive,
 	release: () => Promise<void>,
 ): Transaction {
-	let state: TransactionState = 'open';
+	// Lifecycle state (ADR-0024 §3): open → committed | rolled-back, both
+	// terminal. Orthogonal to `settle` below — the machine answers "which
+	// terminal gate?" while `settle` answers "is finalisation in flight?".
+	const sm = createStateMachine<TransactionState>({
+		initial: 'open',
+		transitions: {
+			open: ['committed', 'rolled-back'],
+			committed: [],
+			'rolled-back': [],
+		},
+	});
 	// Held finalisation promise (commit/rollback). Set synchronously by the
 	// first settle call; once set, the transaction accepts no further work
 	// and every later commit / rollback / dispose awaits this same promise.
@@ -170,7 +181,7 @@ export function makeTransaction(
 	// commit/rollback starting and `state` flipping once its wire op lands —
 	// so a query can't slip onto the connection after a COMMIT was issued.
 	const assertOpen = (): void => {
-		if (state !== 'open') throw new TypeError(TX_NOT_OPEN(state));
+		if (!sm.is('open')) throw new TypeError(TX_NOT_OPEN(sm.state));
 		if (settle !== null) throw new TypeError(TX_SETTLING);
 	};
 
@@ -253,7 +264,7 @@ export function makeTransaction(
 				// still live and the transaction is still open and not
 				// settling. A spent mark, or one whose transaction already
 				// settled, is a no-op.
-				if (spState !== 'active' || state !== 'open' || settle !== null) return;
+				if (spState !== 'active' || !sm.is('open') || settle !== null) return;
 				popTo(stack.indexOf(entry), 'released');
 			},
 		};
@@ -293,7 +304,7 @@ export function makeTransaction(
 		settle = (async () => {
 			try {
 				await exclusive(wire);
-				state = settled;
+				sm.to(settled);
 			} finally {
 				popTo(0, settled === 'committed' ? 'released' : 'rolled-back');
 				await release().catch(swallow);
@@ -317,7 +328,7 @@ export function makeTransaction(
 	};
 
 	Object.defineProperty(tx, 'state', {
-		get(): TransactionState { return state; },
+		get(): TransactionState { return sm.state; },
 	});
 
 	return tx;

@@ -102,7 +102,7 @@ export interface ClientEvents {
 const queryableStub = {} as Queryable;
 const stubBindQueryable: BindQueryable = (_conn) => queryableStub;
 
-export class Client extends EventEmitter<ClientEvents> {
+export class Client extends EventEmitter<ClientEvents> implements AsyncDisposable {
 	readonly sql: PoolBoundSqlTag;
 
 	readonly #pool: Pool;
@@ -124,7 +124,7 @@ export class Client extends EventEmitter<ClientEvents> {
 
 	// Settle-once memoisation (ADR-0024 §4) for each lifecycle verb: every
 	// caller of a verb shares the one in-flight promise.
-	readonly #connectOnce = onceAsync((): Promise<void> => this.#performConnect());
+	readonly #connectOnce = onceAsync((): Promise<Client> => this.#performConnect().then(() => this));
 	readonly #closeOnce = onceAsync((): Promise<void> => this.#drain());
 	readonly #destroyOnce = onceAsync((): Promise<void> => this.#forceDestroy());
 
@@ -162,8 +162,8 @@ export class Client extends EventEmitter<ClientEvents> {
 		return this.#sm.state;
 	}
 
-	connect(): Promise<void> {
-		if (this.#sm.is('open')) return Promise.resolve();
+	connect(): Promise<Client> {
+		if (this.#sm.is('open')) return Promise.resolve(this);
 		if (this.#sm.is('pending')) return this.#connectOnce();
 		// Closed (draining | destroyed). The `is()` guards gate the conditions
 		// but don't narrow `#sm.state`, so assert the closed-state type for the
@@ -192,6 +192,16 @@ export class Client extends EventEmitter<ClientEvents> {
 	destroy(): Promise<void> {
 		this.#destroying = true;
 		return this.#destroyOnce();
+	}
+
+	// `await using client = await createClient(cfg).connect()` tears the
+	// client down at scope exit. Disposal is `destroy()`, not `close()`: at
+	// correct usage (work finished, connections released) the two are
+	// identical, but if a connection is still held at scope exit a graceful
+	// drain would hang waiting for a release that isn't coming — so disposal
+	// force-closes, surfacing the leak rather than deadlocking.
+	[Symbol.asyncDispose](): Promise<void> {
+		return this.destroy();
 	}
 
 	async #performConnect(): Promise<void> {

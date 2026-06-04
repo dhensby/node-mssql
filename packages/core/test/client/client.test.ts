@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+	type Client,
 	ClientClosedError,
 	ClientNotConnectedError,
 	ConnectionError,
@@ -403,5 +404,50 @@ describe('Client — end-to-end smoke', () => {
 		assert.equal(conn?.reset.mock.callCount(), 4, 'reset called per release (connect + 3 queries)');
 
 		await client.close();
+	});
+});
+
+// ─── Ergonomics: connect()→this, await using, non-thenable (#4) ─────────────
+
+describe('Client — ergonomics', () => {
+	test('connect() resolves to the client (chainable)', async () => {
+		const client = createClient({ driver: fakeDriver(), ...baseConfig });
+		const returned = await client.connect();
+		assert.equal(returned, client);
+		await client.close();
+	});
+
+	test('await createClient(...).connect() yields a connected client', async () => {
+		const client = await createClient({ driver: fakeDriver(), ...baseConfig }).connect();
+		assert.equal(client.state, 'open');
+		await client.close();
+	});
+
+	test('await using disposes the client (destroy) at scope exit', async () => {
+		let captured: Client | undefined;
+		{
+			await using client = await createClient({ driver: fakeDriver(), ...baseConfig }).connect();
+			captured = client;
+			assert.equal(client.state, 'open');
+		}
+		assert.ok(captured);
+		assert.equal(captured.state, 'destroyed');
+	});
+
+	test('await using force-closes via destroy() even with a held connection (no hang)', async () => {
+		let conn: FakeConnection | undefined;
+		let captured: Client | undefined;
+		const driver = fakeDriver({ connectionFactory: () => (conn = fakeConnection()) });
+		{
+			await using client = await createClient({ driver, ...baseConfig }).connect();
+			captured = client;
+			// Acquire a ReservedConn and never release it. A graceful close()
+			// would block forever here; destroy()-on-dispose must not.
+			await client.sql.acquire();
+		}
+		assert.ok(captured);
+		assert.equal(captured.state, 'destroyed');
+		assert.ok(conn);
+		assert.equal(conn.close.mock.callCount(), 1, 'held connection force-closed on dispose');
 	});
 });

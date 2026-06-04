@@ -21,49 +21,9 @@ import {
 	type ClientClosePayload,
 	type ClientState,
 	type ClientStateChangePayload,
-	type Connection,
-	type ConnectionEvents,
 	createClient,
-	type Driver,
-	type ExecuteRequest,
-	type ResultEvent,
 } from '../../src/index.js';
-
-// ─── FakeDriver — minimal scriptable shell ───────────────────────────────
-
-class FakeConnection
-	extends EventEmitter<ConnectionEvents>
-	implements Connection
-{
-	readonly id = 'conn_event';
-	execute(_req: ExecuteRequest): AsyncIterable<ResultEvent> {
-		return (async function* () { yield { kind: 'done' as const }; })();
-	}
-	async beginTransaction(): Promise<void> { /* */ }
-	async commit(): Promise<void> { /* */ }
-	async rollback(): Promise<void> { /* */ }
-	async savepoint(): Promise<void> { /* */ }
-	async rollbackToSavepoint(): Promise<void> { /* */ }
-	async prepare(): Promise<{ id: string }> { return { id: 'p' }; }
-	async bulkLoad(): Promise<{ rowsAffected: number }> { return { rowsAffected: 0 }; }
-	async reset(): Promise<void> { /* */ }
-	async ping(): Promise<void> { /* */ }
-	async close(): Promise<void> { /* */ }
-}
-
-const fakeDriver = (opts?: { openShouldFail?: Error }): Driver => ({
-	name: 'fake',
-	types: {},
-	async open() {
-		if (opts?.openShouldFail !== undefined) throw opts.openShouldFail;
-		return new FakeConnection();
-	},
-});
-
-const baseConfig = {
-	credential: { kind: 'integrated' as const },
-	transport: { host: 'db.local' },
-};
+import { baseConfig, fakeDriver } from '../support/fakes.js';
 
 // Subscribe + capture all `state-change` publishes for the test's scope.
 // Returns the captured array and an unsubscribe to call from `finally`.

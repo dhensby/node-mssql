@@ -1,43 +1,16 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
 import type {
 	Connection,
-	ConnectionEvents,
-	ExecuteRequest,
 	Pool,
 	PooledConnection,
 	PoolState,
 	PoolStats,
-	ResultEvent,
 } from '../../src/index.js';
-
-class FakeConnection
-	extends EventEmitter<ConnectionEvents>
-	implements Connection
-{
-	readonly id = 'conn_pool_1';
-	async *execute(_req: ExecuteRequest): AsyncIterable<ResultEvent> {
-		yield { kind: 'done' };
-	}
-	async beginTransaction(): Promise<void> {}
-	async commit(): Promise<void> {}
-	async rollback(): Promise<void> {}
-	async savepoint(): Promise<void> {}
-	async rollbackToSavepoint(): Promise<void> {}
-	async prepare(): Promise<{ id: string }> {
-		return { id: 'prep_1' };
-	}
-	async bulkLoad(): Promise<{ rowsAffected: number }> {
-		return { rowsAffected: 0 };
-	}
-	async reset(): Promise<void> {}
-	async ping(): Promise<void> {}
-	async close(): Promise<void> {}
-}
+import { fakeConnection } from '../support/fakes.js';
 
 class FakePooledConnection implements PooledConnection {
-	readonly connection: Connection = new FakeConnection();
+	readonly connection: Connection = fakeConnection({ id: 'conn_pool_1' });
 	released = false;
 	destroyed = false;
 	async release(): Promise<void> {

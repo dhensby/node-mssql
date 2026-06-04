@@ -1,62 +1,24 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import type {
-	Connection,
-	ConnectionEvents,
-	Driver,
-	DriverOptions,
-	ExecuteRequest,
-	ResultEvent,
-} from '../../src/driver/index.js';
+import type { ResultEvent } from '../../src/driver/index.js';
+import { fakeDriver } from '../support/fakes.js';
 
-class FakeConnection
-	extends EventEmitter<ConnectionEvents>
-	implements Connection
-{
-	readonly id = 'conn_test_1';
-
-	async *execute(_req: ExecuteRequest): AsyncIterable<ResultEvent> {
-		yield { kind: 'done' };
-	}
-	async beginTransaction(): Promise<void> {}
-	async commit(): Promise<void> {}
-	async rollback(): Promise<void> {}
-	async savepoint(): Promise<void> {}
-	async rollbackToSavepoint(): Promise<void> {}
-	async prepare(): Promise<{ id: string }> {
-		return { id: 'prep_1' };
-	}
-	async bulkLoad(): Promise<{ rowsAffected: number }> {
-		return { rowsAffected: 0 };
-	}
-	async reset(): Promise<void> {}
-	async ping(): Promise<void> {}
-	async close(): Promise<void> {}
-}
-
-const fakeDriver: Driver = {
-	name: 'fake',
-	types: {},
-	async open(_opts: DriverOptions): Promise<Connection> {
-		return new FakeConnection();
-	},
-};
+const driver = fakeDriver();
 
 describe('Driver port', () => {
 	test('interface implementable by a fake adapter', async () => {
-		assert.equal(fakeDriver.name, 'fake');
-		assert.equal(typeof fakeDriver.open, 'function');
+		assert.equal(driver.name, 'fake');
+		assert.equal(typeof driver.open, 'function');
 
-		const conn = await fakeDriver.open({
+		const conn = await driver.open({
 			credential: { kind: 'integrated' },
 			transport: { host: 'db.local' },
 		});
-		assert.equal(conn.id, 'conn_test_1');
+		assert.equal(conn.id, 'conn_fake');
 	});
 
 	test('Connection.execute produces AsyncIterable<ResultEvent>', async () => {
-		const conn = await fakeDriver.open({
+		const conn = await driver.open({
 			credential: { kind: 'integrated' },
 			transport: { host: 'db.local' },
 		});

@@ -1,12 +1,9 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
 import type {
 	Connection,
-	ConnectionEvents,
 	Driver,
 	DriverOptions,
-	ExecuteRequest,
 	Pool,
 	PoolContext,
 	PoolFactory,
@@ -14,45 +11,10 @@ import type {
 	PoolState,
 	PoolStats,
 	Queryable,
-	ResultEvent,
 } from '../../src/index.js';
+import { fakeConnection, fakeDriver, fakeDriverOptions } from '../support/fakes.js';
 
-class FakeConnection
-	extends EventEmitter<ConnectionEvents>
-	implements Connection
-{
-	readonly id = 'conn_factory_1';
-	async *execute(_req: ExecuteRequest): AsyncIterable<ResultEvent> {
-		yield { kind: 'done' };
-	}
-	async beginTransaction(): Promise<void> {}
-	async commit(): Promise<void> {}
-	async rollback(): Promise<void> {}
-	async savepoint(): Promise<void> {}
-	async rollbackToSavepoint(): Promise<void> {}
-	async prepare(): Promise<{ id: string }> {
-		return { id: 'prep_1' };
-	}
-	async bulkLoad(): Promise<{ rowsAffected: number }> {
-		return { rowsAffected: 0 };
-	}
-	async reset(): Promise<void> {}
-	async ping(): Promise<void> {}
-	async close(): Promise<void> {}
-}
-
-const fakeDriver: Driver = {
-	name: 'fake',
-	types: {},
-	async open(_opts: DriverOptions): Promise<Connection> {
-		return new FakeConnection();
-	},
-};
-
-const fakeDriverOptions: DriverOptions = {
-	credential: { kind: 'integrated' },
-	transport: { host: 'db.local' },
-};
+const driver = fakeDriver({ connectionFactory: () => fakeConnection({ id: 'conn_factory_1' }) });
 
 class FakePool implements Pool {
 	readonly ctx: PoolContext;
@@ -106,7 +68,7 @@ const bindQueryable = (_conn: Connection): Queryable => queryableStub;
 describe('PoolFactory', () => {
 	test('produces a Pool from a PoolContext', async () => {
 		const pool = fakePoolFactory({
-			driver: fakeDriver,
+			driver,
 			driverOptions: fakeDriverOptions,
 			bindQueryable,
 		});
@@ -122,7 +84,7 @@ describe('PoolFactory', () => {
 			types: {},
 			async open(opts) {
 				seen.push(opts);
-				return new FakeConnection();
+				return fakeConnection();
 			},
 		};
 		const pool = fakePoolFactory({
@@ -141,7 +103,7 @@ describe('PoolContext hooks', () => {
 		const acquired: Queryable[] = [];
 		const released: Queryable[] = [];
 		const pool = fakePoolFactory({
-			driver: fakeDriver,
+			driver,
 			driverOptions: fakeDriverOptions,
 			bindQueryable,
 			hooks: {
@@ -163,7 +125,7 @@ describe('PoolContext hooks', () => {
 
 	test('optional; factory works without hooks', async () => {
 		const pool = fakePoolFactory({
-			driver: fakeDriver,
+			driver,
 			driverOptions: fakeDriverOptions,
 			bindQueryable,
 		});

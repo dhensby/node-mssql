@@ -15,131 +15,13 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
 import {
-	type Connection,
-	type ConnectionEvents,
-	type ExecuteRequest,
-	type Pool,
-	type PooledConnection,
-	type PoolStats,
-	type PrepareRequest,
-	type PreparedHandle,
 	type ResultEvent,
 	makePoolBoundSqlTag,
 } from '../../src/index.js';
+import { fakeConnection, fakePool } from '../support/fakes.js';
 
 // ─── Test fixtures ──────────────────────────────────────────────────────────
-
-interface ConnLog {
-	executes: ExecuteRequest[]
-	executeSignals: (AbortSignal | undefined)[]
-	closed: boolean
-	beginCalls: number
-	commitCalls: number
-	rollbackCalls: number
-}
-
-class FakeConnection
-	extends EventEmitter<ConnectionEvents>
-	implements Connection
-{
-	readonly id = 'conn_test_1';
-	readonly log: ConnLog = {
-		executes: [], executeSignals: [], closed: false,
-		beginCalls: 0, commitCalls: 0, rollbackCalls: 0,
-	};
-	#scripted: ResultEvent[][] | undefined;
-	#callIndex = 0;
-	// Override hook for tests that need bespoke execute behaviour (e.g.
-	// failing first call). Set this BEFORE running queries.
-	executeOverride?: (req: ExecuteRequest, signal?: AbortSignal) => AsyncIterable<ResultEvent>;
-
-	constructor(scriptedEvents?: ResultEvent[][]) {
-		super();
-		this.#scripted = scriptedEvents;
-	}
-
-	execute(req: ExecuteRequest, signal?: AbortSignal): AsyncIterable<ResultEvent> {
-		this.log.executes.push(req);
-		this.log.executeSignals.push(signal);
-		if (this.executeOverride !== undefined) {
-			return this.executeOverride(req, signal);
-		}
-		const events = this.#scripted?.[this.#callIndex] ?? [{ kind: 'done' as const }];
-		this.#callIndex++;
-		return (async function* () {
-			for (const e of events) yield e;
-		})();
-	}
-	async beginTransaction(): Promise<void> { this.log.beginCalls++; }
-	async commit(): Promise<void> { this.log.commitCalls++; }
-	async rollback(): Promise<void> { this.log.rollbackCalls++; }
-	async savepoint(): Promise<void> { /* */ }
-	async rollbackToSavepoint(): Promise<void> { /* */ }
-	async prepare(_req: PrepareRequest): Promise<PreparedHandle> {
-		return { id: 'prep_1', execute() { return (async function* () { yield { kind: 'done' as const }; })(); }, async unprepare() { /* */ } } as unknown as PreparedHandle;
-	}
-	async bulkLoad(): Promise<{ rowsAffected: number }> { return { rowsAffected: 0 }; }
-	async reset(): Promise<void> { /* */ }
-	async ping(): Promise<void> { /* */ }
-	async close(): Promise<void> { this.log.closed = true; }
-}
-
-const makeFakeConnection = (
-	scriptedEvents?: ResultEvent[][],
-): { conn: FakeConnection; log: ConnLog } => {
-	const conn = new FakeConnection(scriptedEvents);
-	return { conn, log: conn.log };
-};
-
-interface PoolLog {
-	acquires: number
-	acquireSignals: (AbortSignal | undefined)[]
-	releases: number
-	destroys: number
-}
-
-const makeFakePool = (
-	conn: Connection,
-): { pool: Pool; log: PoolLog } => {
-	const log: PoolLog = { acquires: 0, acquireSignals: [], releases: 0, destroys: 0 };
-	let inUse = false;
-	const stats: PoolStats = { size: 1, available: 1, inUse: 0, pending: 0 };
-
-	const pool: Pool = {
-		state: 'open',
-		stats,
-		async acquire(signal) {
-			log.acquires++;
-			log.acquireSignals.push(signal);
-			signal?.throwIfAborted();
-			if (inUse) {
-				throw new Error('FakePool only supports one acquire at a time');
-			}
-			inUse = true;
-			const pooled: PooledConnection = {
-				connection: conn,
-				async release() {
-					if (!inUse) return;
-					inUse = false;
-					log.releases++;
-				},
-				async destroy() {
-					inUse = false;
-					log.destroys++;
-				},
-				async [Symbol.asyncDispose]() {
-					await pooled.release();
-				},
-			};
-			return pooled;
-		},
-		async drain() { /* */ },
-		async destroy() { /* */ },
-	};
-	return { pool, log };
-};
 
 // Build a pool-bound tag rooted at the fake pool — same wiring the
 // Client uses (poolRunner + the pool's acquire), without going through
@@ -147,8 +29,13 @@ const makeFakePool = (
 const makePool = (
 	scriptedEvents?: ResultEvent[][],
 ) => {
-	const { conn, log: connLog } = makeFakeConnection(scriptedEvents);
-	const { pool, log: poolLog } = makeFakePool(conn);
+	let callIndex = 0;
+	const conn = fakeConnection(
+		scriptedEvents !== undefined
+			? { execute: () => scriptedEvents[callIndex++] ?? [{ kind: 'done' }] }
+			: undefined,
+	);
+	const { pool, release } = fakePool(conn);
 	const sql = makePoolBoundSqlTag(
 		{
 			run(req, signal) {
@@ -162,35 +49,35 @@ const makePool = (
 		},
 		(signal) => pool.acquire(signal),
 	);
-	return { sql, pool, connLog, poolLog };
+	return { sql, conn, pool, release };
 };
 
 // ─── sql.acquire() — builder + ReservedConn shape ──────────────────────────
 
 describe('sql.acquire() — builder shape', () => {
 	test('await sql.acquire() resolves to a ReservedConn (callable + .unsafe + .release)', async () => {
-		const { sql, poolLog } = makePool();
+		const { sql, pool } = makePool();
 		const conn = await sql.acquire();
 		assert.equal(typeof conn, 'function');
 		assert.equal(typeof conn.unsafe, 'function');
 		assert.equal(typeof conn.release, 'function');
 		assert.equal(typeof conn[Symbol.asyncDispose], 'function');
-		assert.equal(poolLog.acquires, 1);
+		assert.equal(pool.acquire.mock.callCount(), 1);
 		await conn.release();
 	});
 
 	test('builder is lazy — calling sql.acquire() does NOT pre-acquire', () => {
-		const { sql, poolLog } = makePool();
+		const { sql, pool } = makePool();
 		sql.acquire();  // Build only; do not await.
-		assert.equal(poolLog.acquires, 0, 'no acquire until builder is awaited');
+		assert.equal(pool.acquire.mock.callCount(), 0, 'no acquire until builder is awaited');
 	});
 
 	test('.signal(s) is chainable; the signal threads through to pool.acquire()', async () => {
-		const { sql, poolLog } = makePool();
+		const { sql, pool } = makePool();
 		const ac = new AbortController();
 		const conn = await sql.acquire().signal(ac.signal);
-		assert.equal(poolLog.acquires, 1);
-		assert.equal(poolLog.acquireSignals[0], ac.signal);
+		assert.equal(pool.acquire.mock.callCount(), 1);
+		assert.equal(pool.acquire.mock.calls[0]?.arguments[0], ac.signal);
 		await conn.release();
 	});
 
@@ -202,7 +89,7 @@ describe('sql.acquire() — builder shape', () => {
 	});
 
 	test('aborted signal rejects the builder before acquire', async () => {
-		const { sql, poolLog } = makePool();
+		const { sql, pool } = makePool();
 		const ac = new AbortController();
 		ac.abort(new Error('caller cancelled'));
 		await assert.rejects(
@@ -210,7 +97,7 @@ describe('sql.acquire() — builder shape', () => {
 			/caller cancelled/,
 		);
 		// pool.acquire() ran but rejected via throwIfAborted.
-		assert.equal(poolLog.acquires, 1);
+		assert.equal(pool.acquire.mock.callCount(), 1);
 	});
 
 	test('.signal() after the builder has been awaited throws TypeError', async () => {
@@ -229,7 +116,7 @@ describe('sql.acquire() — builder shape', () => {
 
 describe('ReservedConn — pinned behaviour', () => {
 	test('queries on the ReservedConn execute against the held connection (no extra acquires)', async () => {
-		const { sql, connLog, poolLog } = makePool();
+		const { sql, conn: backend, pool } = makePool();
 		const conn = await sql.acquire();
 		try {
 			await conn`SELECT 1`;
@@ -240,27 +127,27 @@ describe('ReservedConn — pinned behaviour', () => {
 		}
 		// Only one acquire (the initial pin); three execute calls on the
 		// pinned connection.
-		assert.equal(poolLog.acquires, 1);
-		assert.equal(connLog.executes.length, 3);
+		assert.equal(pool.acquire.mock.callCount(), 1);
+		assert.equal(backend.execute.mock.callCount(), 3);
 	});
 
 	test('release() returns the connection to the pool exactly once', async () => {
-		const { sql, poolLog } = makePool();
+		const { sql, release } = makePool();
 		const conn = await sql.acquire();
 		await conn.release();
-		assert.equal(poolLog.releases, 1);
+		assert.equal(release.mock.callCount(), 1);
 		// Idempotent — second call no-ops.
 		await conn.release();
-		assert.equal(poolLog.releases, 1);
+		assert.equal(release.mock.callCount(), 1);
 	});
 
 	test('await using disposes the ReservedConn (releases the connection)', async () => {
-		const { sql, poolLog } = makePool();
+		const { sql, release } = makePool();
 		{
 			await using _conn = await sql.acquire();
 			// scope exit triggers Symbol.asyncDispose
 		}
-		assert.equal(poolLog.releases, 1);
+		assert.equal(release.mock.callCount(), 1);
 	});
 
 	test('queries after release() throw TypeError', async () => {
@@ -272,12 +159,12 @@ describe('ReservedConn — pinned behaviour', () => {
 	});
 
 	test('.unsafe() works on a ReservedConn', async () => {
-		const { sql, connLog } = makePool();
+		const { sql, conn: backend } = makePool();
 		const conn = await sql.acquire();
 		try {
 			await conn.unsafe('SELECT * FROM t WHERE id = @id', { id: 7 });
-			assert.equal(connLog.executes[0]?.sql, 'SELECT * FROM t WHERE id = @id');
-			assert.deepEqual(connLog.executes[0]?.params, [{ name: 'id', value: 7 }]);
+			assert.equal(backend.execute.mock.calls[0]?.arguments[0].sql, 'SELECT * FROM t WHERE id = @id');
+			assert.deepEqual(backend.execute.mock.calls[0]?.arguments[0].params, [{ name: 'id', value: 7 }]);
 		} finally {
 			await conn.release();
 		}
@@ -319,7 +206,7 @@ describe('ReservedConn — concurrent queries serialise FIFO', () => {
 				{ kind: 'done' },
 			],
 		];
-		const { sql, connLog } = makePool(events);
+		const { sql, conn: backend } = makePool(events);
 		const conn = await sql.acquire();
 		try {
 			const [a, b, c] = await Promise.all([
@@ -332,7 +219,7 @@ describe('ReservedConn — concurrent queries serialise FIFO', () => {
 			assert.deepEqual(b, [{ n: 2 }]);
 			assert.deepEqual(c, [{ n: 3 }]);
 			assert.deepEqual(
-				connLog.executes.map((r) => r.sql),
+				backend.execute.mock.calls.map((call) => call.arguments[0].sql),
 				['SELECT 1 AS n', 'SELECT 2 AS n', 'SELECT 3 AS n'],
 			);
 		} finally {
@@ -344,7 +231,7 @@ describe('ReservedConn — concurrent queries serialise FIFO', () => {
 		// First query errors; second and third should still run on the
 		// shared connection.
 		const events: ResultEvent[][] = [
-			[],  // first will error before any events are read; we'll override
+			[],  // first will error before any events are read
 			[
 				{ kind: 'metadata', columns: [{ name: 'n' }] },
 				{ kind: 'row', values: [42] },
@@ -352,23 +239,18 @@ describe('ReservedConn — concurrent queries serialise FIFO', () => {
 				{ kind: 'done' },
 			],
 		];
-		const { conn: connBackend, log: connLog } = makeFakeConnection();
-		// Override execute to throw on first call.
+		// execute throws on the first call, serves the scripted set after.
 		let call = 0;
-		connBackend.execute = (req, _sig) => {
-			connLog.executes.push(req);
-			const idx = call++;
-			return (async function* () {
+		const backend = fakeConnection({
+			execute: () => {
+				const idx = call++;
 				if (idx === 0) {
 					throw new Error('first failed');
 				}
-				const evs = events[idx];
-				if (evs !== undefined) {
-					for (const e of evs) yield e;
-				}
-			})();
-		};
-		const { pool } = makeFakePool(connBackend);
+				return events[idx] ?? [];
+			},
+		});
+		const { pool } = fakePool(backend);
 		const sql = makePoolBoundSqlTag(
 			{
 				run(req, signal) {
@@ -400,12 +282,12 @@ describe('ReservedConn — concurrent queries serialise FIFO', () => {
 
 describe('PoolBoundSqlTag — surface', () => {
 	test('inherits the base SqlTag callable + .unsafe', async () => {
-		const { sql, connLog } = makePool();
+		const { sql, conn: backend } = makePool();
 		await sql`SELECT 1`;
 		await sql.unsafe('SELECT 2');
-		assert.equal(connLog.executes.length, 2);
-		assert.equal(connLog.executes[0]?.sql, 'SELECT 1');
-		assert.equal(connLog.executes[1]?.sql, 'SELECT 2');
+		assert.equal(backend.execute.mock.callCount(), 2);
+		assert.equal(backend.execute.mock.calls[0]?.arguments[0].sql, 'SELECT 1');
+		assert.equal(backend.execute.mock.calls[1]?.arguments[0].sql, 'SELECT 2');
 	});
 
 	test('a ReservedConn does NOT carry .acquire (no nested acquire)', async () => {
@@ -426,31 +308,31 @@ describe('PoolBoundSqlTag — surface', () => {
 
 describe('ReservedConn — .transaction()', () => {
 	test('opens a transaction on the held connection (BEGIN on the same conn)', async () => {
-		const { sql, connLog, poolLog } = makePool();
+		const { sql, conn: backend, pool } = makePool();
 		await using conn = await sql.acquire();
 		const tx = await conn.transaction();
 		try {
 			await tx`SELECT 1`;
-			assert.equal(connLog.beginCalls, 1, 'BEGIN fired on the held connection');
-			assert.equal(poolLog.acquires, 1, 'no second acquire — reused the held connection');
+			assert.equal(backend.beginTransaction.mock.callCount(), 1, 'BEGIN fired on the held connection');
+			assert.equal(pool.acquire.mock.callCount(), 1, 'no second acquire — reused the held connection');
 		} finally {
 			await tx.commit();
 		}
 	});
 
 	test('committing the transaction does NOT release the connection (the ReservedConn owns it)', async () => {
-		const { sql, connLog, poolLog } = makePool();
+		const { sql, conn: backend, release } = makePool();
 		const conn = await sql.acquire();
 		const tx = await conn.transaction();
 		await tx.commit();
-		assert.equal(connLog.commitCalls, 1);
-		assert.equal(poolLog.releases, 0, 'commit did not return the connection to the pool');
+		assert.equal(backend.commit.mock.callCount(), 1);
+		assert.equal(release.mock.callCount(), 0, 'commit did not return the connection to the pool');
 		// The ReservedConn is still usable after the transaction commits.
 		await conn`SELECT after-commit`;
-		assert.equal(connLog.executes.at(-1)?.sql, 'SELECT after-commit');
+		assert.equal(backend.execute.mock.calls.at(-1)?.arguments[0].sql, 'SELECT after-commit');
 		// Releasing the ReservedConn is what returns it to the pool.
 		await conn.release();
-		assert.equal(poolLog.releases, 1);
+		assert.equal(release.mock.callCount(), 1);
 	});
 
 	test('the transaction supports savepoints on the held connection', async () => {

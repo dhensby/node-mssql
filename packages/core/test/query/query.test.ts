@@ -10,44 +10,9 @@ import {
 	type RequestRunner,
 	type ResultEvent,
 } from '../../src/index.js';
+import { fakeRunner } from '../support/fakes.js';
 
 // ─── Test fixtures ──────────────────────────────────────────────────────────
-
-interface RunnerLog {
-	calls: number
-	requests: ExecuteRequest[]
-	signals: (AbortSignal | undefined)[]
-	releases: number  // how many times the runner's try/finally fired
-}
-
-// Build a `RequestRunner` that yields a scripted sequence of `ResultEvent`s.
-// Modelled on what the pool-bound runner will do (ADR-0023): the async
-// generator's `try/finally` simulates `pool.release()` happening on stream
-// end (drain or error). The `releases` counter on the log validates that
-// release ran for whatever exit path the test exercises.
-const makeFakeRunner = (
-	events: ResultEvent[] | (() => ResultEvent[]),
-): { runner: RequestRunner; log: RunnerLog } => {
-	const log: RunnerLog = { calls: 0, requests: [], signals: [], releases: 0 };
-	const runner: RequestRunner = {
-		run(req, signal) {
-			log.calls++;
-			log.requests.push(req);
-			log.signals.push(signal);
-			return (async function* () {
-				try {
-					const evs = typeof events === 'function' ? events() : events;
-					for (const event of evs) {
-						yield event;
-					}
-				} finally {
-					log.releases++;
-				}
-			})();
-		},
-	};
-	return { runner, log };
-};
 
 const stmt = (sql: string): ExecuteRequest => ({ sql });
 
@@ -55,23 +20,23 @@ const stmt = (sql: string): ExecuteRequest => ({ sql });
 
 describe('Query — construction & lazy execution', () => {
 	test('constructing a Query does not invoke the runner', () => {
-		const { runner, log } = makeFakeRunner([]);
+		const { runner } = fakeRunner([]);
 		new Query({ runner, request: stmt('SELECT 1') });
-		assert.equal(log.calls, 0, 'runner was not called at construction');
+		assert.equal(runner.run.mock.callCount(), 0, 'runner was not called at construction');
 	});
 
 	test('runner is invoked when a terminal fires', async () => {
-		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.all();
-		assert.equal(log.calls, 1);
+		assert.equal(runner.run.mock.callCount(), 1);
 	});
 
 	test('runner receives the configured ExecuteRequest', async () => {
-		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const req: ExecuteRequest = { sql: 'SELECT @p', params: [{ name: 'p', value: 1 }] };
 		await new Query({ runner, request: req }).all();
-		assert.equal(log.requests[0], req);
+		assert.equal(runner.run.mock.calls[0]?.arguments[0], req);
 	});
 
 	test('runner receives a signal that propagates the consumer-supplied AbortSignal', async () => {
@@ -79,10 +44,10 @@ describe('Query — construction & lazy execution', () => {
 		// controller (ADR-0023) — so the runner sees a NEW signal that
 		// aborts when EITHER source fires. We verify behaviour rather
 		// than reference equality.
-		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const ac = new AbortController();
 		await new Query({ runner, request: stmt('SELECT 1'), signal: ac.signal }).all();
-		const runnerSignal = log.signals[0];
+		const runnerSignal = runner.run.mock.calls[0]?.arguments[1];
 		assert.ok(runnerSignal !== undefined, 'runner received a signal');
 		assert.equal(runnerSignal.aborted, false);
 		ac.abort();
@@ -94,7 +59,7 @@ describe('Query — construction & lazy execution', () => {
 
 describe('Query — PromiseLike', () => {
 	test('`await query` resolves to the row array (.then delegates to .all)', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -105,7 +70,7 @@ describe('Query — PromiseLike', () => {
 	});
 
 	test('Promise.all on multiple Queries works (each Query awaits independently)', async () => {
-		const { runner } = makeFakeRunner(() => [
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -124,7 +89,7 @@ describe('Query — PromiseLike', () => {
 
 describe('Query.all() — single rowset', () => {
 	test('returns rows shaped as objects keyed by column name', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'id' }, { name: 'name' }] },
 			{ kind: 'row', values: [1, 'alice'] },
 			{ kind: 'row', values: [2, 'bob'] },
@@ -142,7 +107,7 @@ describe('Query.all() — single rowset', () => {
 	});
 
 	test('empty rowset (metadata, no rows) returns []', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'id' }] },
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
 			{ kind: 'done' },
@@ -152,7 +117,7 @@ describe('Query.all() — single rowset', () => {
 	});
 
 	test('no rowset (DML, no metadata, no rows) returns []', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'rowsetEnd', rowsAffected: 3 },
 			{ kind: 'done' },
 		]);
@@ -163,7 +128,7 @@ describe('Query.all() — single rowset', () => {
 	test('row values arrive verbatim (no implicit type coercion at the kernel layer)', async () => {
 		const date = new Date('2026-05-06T00:00:00Z');
 		const buf = new Uint8Array([1, 2, 3]);
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'd' }, { name: 'b' }, { name: 'n' }] },
 			{ kind: 'row', values: [date, buf, null] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -184,7 +149,7 @@ describe('Query.all() — single rowset', () => {
 
 describe('Query.all() — duplicate column names', () => {
 	test('collapses duplicate column names with last-wins semantics', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'id' }, { name: 'id' }] },
 			{ kind: 'row', values: [1, 2] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -202,14 +167,14 @@ describe('Query.all() — duplicate column names', () => {
 
 describe('Query — single-consumption', () => {
 	test('a second .all() call throws TypeError', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.all();
 		await assert.rejects(() => q.all(), TypeError);
 	});
 
 	test('a second `await` throws TypeError', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q;
 		await assert.rejects(async () => {
@@ -218,12 +183,12 @@ describe('Query — single-consumption', () => {
 	});
 
 	test('the guard fires synchronously on entry, before consuming the runner', async () => {
-		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.all();
-		assert.equal(log.calls, 1);
+		assert.equal(runner.run.mock.callCount(), 1);
 		await assert.rejects(() => q.all(), TypeError);
-		assert.equal(log.calls, 1, 'second call did not invoke runner');
+		assert.equal(runner.run.mock.callCount(), 1, 'second call did not invoke runner');
 	});
 });
 
@@ -231,7 +196,7 @@ describe('Query — single-consumption', () => {
 
 describe('Query.all() — multi-rowset detection', () => {
 	test('throws MultipleRowsetsError when a second metadata token arrives', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -249,7 +214,7 @@ describe('Query.all() — multi-rowset detection', () => {
 	test('does not fire on a single rowset followed by trailer-only events', async () => {
 		// `rowsetEnd` then trailer events (output, returnValue) but NO second
 		// metadata — single rowset, just with extra trailer data.
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -285,9 +250,9 @@ describe('Query — error propagation and release', () => {
 	});
 
 	test('runner try/finally fires on natural drain (release-on-end)', async () => {
-		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner, release } = fakeRunner([{ kind: 'done' }]);
 		await new Query({ runner, request: stmt('SELECT 1') }).all();
-		assert.equal(log.releases, 1, 'try/finally ran exactly once');
+		assert.equal(release.mock.callCount(), 1, 'try/finally ran exactly once');
 	});
 
 	test('runner try/finally fires on stream error (release-on-error)', async () => {
@@ -347,7 +312,7 @@ describe('Query — error propagation and release', () => {
 
 describe('Query.iterate() — streaming row consumption', () => {
 	test('yields rows one at a time as objects', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'row', values: [2] },
@@ -364,7 +329,7 @@ describe('Query.iterate() — streaming row consumption', () => {
 	});
 
 	test('Query is itself AsyncIterable — `for await (const row of q)` works', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [42] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -379,7 +344,7 @@ describe('Query.iterate() — streaming row consumption', () => {
 	});
 
 	test('breaking out of for-await calls iter.return() on the runner (release-on-break)', async () => {
-		const { runner, log } = makeFakeRunner([
+		const { runner, release } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'row', values: [2] },
@@ -394,11 +359,11 @@ describe('Query.iterate() — streaming row consumption', () => {
 			if (n === 1) break;
 		}
 		assert.equal(n, 1);
-		assert.equal(log.releases, 1, 'runner finally fired on break');
+		assert.equal(release.mock.callCount(), 1, 'runner finally fired on break');
 	});
 
 	test('throws MultipleRowsetsError on a second metadata token', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -416,7 +381,7 @@ describe('Query.iterate() — streaming row consumption', () => {
 	});
 
 	test('iterate() is single-consumption (calling twice throws)', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		// First call exhausts.
 		for await (const _row of q.iterate()) { /* noop */ }
@@ -424,7 +389,7 @@ describe('Query.iterate() — streaming row consumption', () => {
 	});
 
 	test('iterate() and all() share the single-consumption guard', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -440,7 +405,7 @@ describe('Query.iterate() — streaming row consumption', () => {
 
 describe('Query.run() — drain-only', () => {
 	test('drains the stream and returns trailer with rowsAffected', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'rowsetEnd', rowsAffected: 5 },
 			{ kind: 'done' },
 		]);
@@ -452,7 +417,7 @@ describe('Query.run() — drain-only', () => {
 	});
 
 	test('does NOT throw MultipleRowsetsError on multi-rowset (drain-only is rowset-oblivious)', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -468,7 +433,7 @@ describe('Query.run() — drain-only', () => {
 	});
 
 	test('aggregates multi-statement rowsAffected', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'rowsetEnd', rowsAffected: 3 },
 			{ kind: 'rowsetEnd', rowsAffected: 7 },
 			{ kind: 'done' },
@@ -480,7 +445,7 @@ describe('Query.run() — drain-only', () => {
 	});
 
 	test('is single-consumption (second call throws)', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('UPDATE t') });
 		await q.run();
 		await assert.rejects(() => q.run(), TypeError);
@@ -491,7 +456,7 @@ describe('Query.run() — drain-only', () => {
 
 describe('Query.result()', () => {
 	test('returns { rows, meta } in a single call', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'id' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'row', values: [2] },
@@ -506,7 +471,7 @@ describe('Query.result()', () => {
 	});
 
 	test('result() consumes once — subsequent terminal calls throw', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'id' }] },
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
 			{ kind: 'done' },
@@ -517,7 +482,7 @@ describe('Query.result()', () => {
 	});
 
 	test('throws MultipleRowsetsError on multi-rowset (row-promising terminal)', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }] },
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
 			{ kind: 'metadata', columns: [{ name: 'b' }] },
@@ -533,13 +498,13 @@ describe('Query.result()', () => {
 
 describe('Query.meta() — trailer access', () => {
 	test('throws TypeError if called before stream terminates', () => {
-		const { runner } = makeFakeRunner([]);
+		const { runner } = fakeRunner([]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		assert.throws(() => q.meta(), TypeError);
 	});
 
 	test('returns trailer with completed=true after natural drain', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -572,7 +537,7 @@ describe('Query.meta() — trailer access', () => {
 	});
 
 	test('returns completed=false when consumer breaks early', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'row', values: [2] },
@@ -588,7 +553,7 @@ describe('Query.meta() — trailer access', () => {
 	});
 
 	test('multiple .meta() calls return the same trailer state', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
 			{ kind: 'done' },
 		]);
@@ -721,7 +686,7 @@ describe('Query — trailer event accumulation', () => {
 			procName: 'sp_x',
 			lineNumber: 12,
 		};
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			infoEvent,
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
 			{ kind: 'done' },
@@ -741,7 +706,7 @@ describe('Query — trailer event accumulation', () => {
 	});
 
 	test('print messages accumulate in meta.print', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'print', message: 'first' },
 			{ kind: 'print', message: 'second' },
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
@@ -753,7 +718,7 @@ describe('Query — trailer event accumulation', () => {
 	});
 
 	test('envChange events accumulate in meta.envChanges', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'envChange', type: 'database', oldValue: 'master', newValue: 'tempdb' },
 			{ kind: 'envChange', type: 'language', oldValue: 'us_english', newValue: 'fr' },
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
@@ -769,7 +734,7 @@ describe('Query — trailer event accumulation', () => {
 	});
 
 	test('output parameters accumulate in meta.output keyed by name', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'output', name: 'newId', value: 42 },
 			{ kind: 'output', name: 'status', value: 'ok' },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -783,7 +748,7 @@ describe('Query — trailer event accumulation', () => {
 	});
 
 	test('returnValue is captured from the last returnValue event', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'returnValue', value: 0 },
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
 			{ kind: 'done' },
@@ -794,7 +759,7 @@ describe('Query — trailer event accumulation', () => {
 	});
 
 	test('returnValue is undefined for non-procedure queries', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
 			{ kind: 'done' },
 		]);
@@ -817,12 +782,12 @@ describe('Query — trailer event accumulation', () => {
 		];
 
 		const a = await new Query({
-			runner: makeFakeRunner(() => [...events]).runner,
+			runner: fakeRunner([...events]).runner,
 			request: stmt('q'),
 		}).all();
 		// Need to retain the Query reference for .meta() — wrap above.
 		const aQ = new Query({
-			runner: makeFakeRunner(() => [...events]).runner,
+			runner: fakeRunner([...events]).runner,
 			request: stmt('q'),
 		});
 		await aQ.all();
@@ -832,7 +797,7 @@ describe('Query — trailer event accumulation', () => {
 		assert.equal(a.length, 1, 'rows still drained');
 
 		const rQ = new Query({
-			runner: makeFakeRunner(() => [...events]).runner,
+			runner: fakeRunner([...events]).runner,
 			request: stmt('q'),
 		});
 		const rMeta = await rQ.run();
@@ -841,7 +806,7 @@ describe('Query — trailer event accumulation', () => {
 		assert.equal(rMeta.returnValue, 7);
 
 		const resQ = new Query({
-			runner: makeFakeRunner(() => [...events]).runner,
+			runner: fakeRunner([...events]).runner,
 			request: stmt('q'),
 		});
 		const { rows: resRows, meta: resMeta } = await resQ.result();
@@ -855,7 +820,7 @@ describe('Query — trailer event accumulation', () => {
 
 describe('Query.raw() — view toggle', () => {
 	test('returns a NEW Query (does not consume the original)', async () => {
-		const { runner } = makeFakeRunner(() => [
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -874,7 +839,7 @@ describe('Query.raw() — view toggle', () => {
 	});
 
 	test('rows arrive as positional tuples in column order', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] },
 			{ kind: 'row', values: [1, 'x', null] },
 			{ kind: 'row', values: [2, 'y', 'z'] },
@@ -887,7 +852,7 @@ describe('Query.raw() — view toggle', () => {
 	});
 
 	test('preserves duplicate-column values that the default object shape collapses', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'id' }, { name: 'id' }] },
 			{ kind: 'row', values: [1, 2] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -899,14 +864,14 @@ describe('Query.raw() — view toggle', () => {
 	});
 
 	test('.raw() does not invoke the runner (lazy)', () => {
-		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		q.raw();
-		assert.equal(log.calls, 0, 'raw() did not start execution');
+		assert.equal(runner.run.mock.callCount(), 0, 'raw() did not start execution');
 	});
 
 	test('.raw() can be called any number of times — each call is a fresh Query', async () => {
-		const { runner } = makeFakeRunner(() => [
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -921,7 +886,7 @@ describe('Query.raw() — view toggle', () => {
 	});
 
 	test('streaming via for-await on a raw Query yields tuples', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }, { name: 'b' }] },
 			{ kind: 'row', values: [1, 'x'] },
 			{ kind: 'row', values: [2, 'y'] },
@@ -937,7 +902,7 @@ describe('Query.raw() — view toggle', () => {
 	});
 
 	test('.run() works on a raw Query (drain-only ignores raw mode)', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'rowsetEnd', rowsAffected: 5 },
 			{ kind: 'done' },
 		]);
@@ -972,7 +937,7 @@ describe('Query.raw() — view toggle', () => {
 
 describe('Query.columns() — first-rowset shape access', () => {
 	test('resolves to the first-rowset metadata when called before any terminal', async () => {
-		const { runner, log } = makeFakeRunner([
+		const { runner, release } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }, { name: 'b' }] },
 			{ kind: 'row', values: [1, 'x'] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -984,12 +949,12 @@ describe('Query.columns() — first-rowset shape access', () => {
 		// Shape pump kicked off a runner.run(); cleanup hasn't fired yet —
 		// the iterator is left paused, awaiting either a row terminal or
 		// dispose().
-		assert.equal(log.calls, 1);
-		assert.equal(log.releases, 0, 'iter left paused — runner finally not yet fired');
+		assert.equal(runner.run.mock.callCount(), 1);
+		assert.equal(release.mock.callCount(), 0, 'iter left paused — runner finally not yet fired');
 	});
 
 	test('resolves to the first-rowset metadata when called after a terminal', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -1004,7 +969,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 	});
 
 	test('returns the same Promise on repeat calls (locked to first rowset)', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }] },
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
 			{ kind: 'done' },
@@ -1018,7 +983,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 	});
 
 	test('after the first metadata is captured, repeat calls resolve to the same content', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -1033,7 +998,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 	});
 
 	test('does NOT consume the Query — terminals can fire after .columns()', async () => {
-		const { runner, log } = makeFakeRunner([
+		const { runner, release } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'row', values: [2] },
@@ -1050,15 +1015,15 @@ describe('Query.columns() — first-rowset shape access', () => {
 		// Single runner.run() call across .columns() + .all() — the row
 		// terminal continued from the paused shape-pump iterator rather
 		// than starting a fresh stream.
-		assert.equal(log.calls, 1, 'shape pump + terminal share one runner.run() call');
-		assert.equal(log.releases, 1, 'natural drain fired runner finally exactly once');
+		assert.equal(runner.run.mock.callCount(), 1, 'shape pump + terminal share one runner.run() call');
+		assert.equal(release.mock.callCount(), 1, 'natural drain fired runner finally exactly once');
 	});
 
 	test('terminal after columns() sees metadata and rows in arrival order', async () => {
 		// The shape pump captures the metadata event into a lookahead
 		// buffer; the row terminal drains it before continuing from the
 		// runner iterator. Verifies the lookahead → continuation handoff.
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [10] },
 			{ kind: 'row', values: [20] },
@@ -1078,7 +1043,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 		// Pure-DML / WAITFOR style — driver emits a `done` (or
 		// rowsetEnd + done) without ever sending metadata. `.columns()`
 		// resolves to the empty array.
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'rowsetEnd', rowsAffected: 0 },
 			{ kind: 'done' },
 		]);
@@ -1090,12 +1055,12 @@ describe('Query.columns() — first-rowset shape access', () => {
 	test('resolves to [] when no terminal fires and the stream has no rowsets', async () => {
 		// Same shape as above but checks the shape-pump path drives the
 		// runner to natural end, then settles `.columns()` with [].
-		const { runner, log } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner, release } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('UPDATE t SET x = 1 WHERE 1 = 0') });
 		const cols = await q.columns();
 		assert.deepEqual(cols, []);
 		// Shape pump exhausted the runner naturally — finally fired.
-		assert.equal(log.releases, 1);
+		assert.equal(release.mock.callCount(), 1);
 	});
 
 	test('rejects with the stream error if the stream errors before metadata', async () => {
@@ -1158,7 +1123,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 	});
 
 	test('rejects with TypeError on a disposed Query', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.dispose();
 		await assert.rejects(() => q.columns(), TypeError);
@@ -1207,7 +1172,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 	});
 
 	test('q.raw().columns() works the same as q.columns() — view toggle does not affect shape access', async () => {
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'a' }, { name: 'b' }] },
 			{ kind: 'row', values: [1, 2] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -1219,7 +1184,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 	});
 
 	test('Promise.all([columns(), all()]) — concurrent-safe across both consumers', async () => {
-		const { runner, log } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'row', values: [2] },
@@ -1231,14 +1196,14 @@ describe('Query.columns() — first-rowset shape access', () => {
 		assert.deepEqual(cols, [{ name: 'n' }]);
 		assert.deepEqual(rows, [{ n: 1 }, { n: 2 }]);
 		// Still a single runner.run() across both consumers.
-		assert.equal(log.calls, 1);
+		assert.equal(runner.run.mock.callCount(), 1);
 	});
 
 	test('locked to FIRST rowset on multi-rowset queries — second rowset metadata is not exposed', async () => {
 		// `.columns()` describes the first rowset only. `.run()` (drain-
 		// only) is rowset-oblivious so it consumes both without throwing,
 		// but `.columns()` still returns just the first.
-		const { runner } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'first' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -1258,7 +1223,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 	});
 
 	test('.run() after .columns() drains the lookahead and completes', async () => {
-		const { runner, log } = makeFakeRunner([
+		const { runner } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -1269,14 +1234,14 @@ describe('Query.columns() — first-rowset shape access', () => {
 		const meta = await q.run();
 		assert.equal(meta.completed, true);
 		assert.equal(meta.rowsAffected, 1);
-		assert.equal(log.calls, 1, 'no second runner.run()');
+		assert.equal(runner.run.mock.callCount(), 1, 'no second runner.run()');
 	});
 
 	test('.dispose() after .columns() (paused shape pump) fires runner finally exactly once', async () => {
 		// Verifies the dispose-on-paused-shape-pump path: cancel() must
 		// call iter.return() on the runner iterator, which triggers the
 		// runner's try/finally and releases the underlying connection.
-		const { runner, log } = makeFakeRunner([
+		const { runner, release } = fakeRunner([
 			{ kind: 'metadata', columns: [{ name: 'n' }] },
 			{ kind: 'row', values: [1] },
 			{ kind: 'rowsetEnd', rowsAffected: 1 },
@@ -1284,9 +1249,9 @@ describe('Query.columns() — first-rowset shape access', () => {
 		]);
 		const q = new Query({ runner, request: stmt('SELECT n') });
 		await q.columns();
-		assert.equal(log.releases, 0, 'iter is paused after shape pump captures metadata');
+		assert.equal(release.mock.callCount(), 0, 'iter is paused after shape pump captures metadata');
 		await q.dispose();
-		assert.equal(log.releases, 1, 'dispose triggered iter.return → runner finally');
+		assert.equal(release.mock.callCount(), 1, 'dispose triggered iter.return → runner finally');
 	});
 });
 
@@ -1311,14 +1276,14 @@ describe('Query.cancel() / .dispose() — feature behaviour', () => {
 	});
 
 	test('cancel() is idempotent — second call is a no-op', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.cancel();
 		await q.cancel();  // doesn't throw
 	});
 
 	test('dispose() cancels and marks the Query unusable', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.dispose();
 		assert.throws(() => q.iterate(), TypeError);
@@ -1327,14 +1292,14 @@ describe('Query.cancel() / .dispose() — feature behaviour', () => {
 	});
 
 	test('dispose() is idempotent', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.dispose();
 		await q.dispose();  // doesn't throw
 	});
 
 	test('await using cleans up at scope end', async () => {
-		const { runner } = makeFakeRunner([{ kind: 'done' }]);
+		const { runner } = fakeRunner([{ kind: 'done' }]);
 		let captured: Query<unknown> | null = null;
 		{
 			await using q = new Query({ runner, request: stmt('SELECT 1') });

@@ -19,8 +19,8 @@
  */
 
 import type { Connection } from '../driver/index.js';
-import { abortErrorFromSignal, PoolClosedError } from '../errors/index.js';
-import { withResolvers } from '../util/index.js';
+import { abortErrorFromSignal, PoolClosedError, type PoolClosedState } from '../errors/index.js';
+import { createStateMachine, onceAsync, withResolvers } from '../util/index.js';
 import type { PoolContext, PoolFactory, PoolOptions } from './factory.js';
 import type { Pool, PooledConnection, PoolState, PoolStats } from './pool.js';
 
@@ -46,21 +46,42 @@ export class SingleConnectionPool implements Pool {
 	// `min > 1` is logically inconsistent. The factory's merge step
 	// (ADR-0011) preserves them for adapters that *do* honour them.
 
-	#state: PoolState = 'open';
+	// Lifecycle state machine (ADR-0024 §3). Non-linear: `destroyed` is
+	// reachable from both `open` (destroy) and `draining` (drain completing
+	// or destroy superseding). No `onTransition` — the pool has no event or
+	// diagnostics surface, so the machine is here purely for centralised,
+	// legal-only transitions and same-state no-op detection.
+	readonly #sm = createStateMachine<PoolState>({
+		initial: 'open',
+		transitions: {
+			open: ['draining', 'destroyed'],
+			draining: ['destroyed'],
+			destroyed: [],
+		},
+	});
 	#connection: Connection | null = null;
 	#inUse = false;
 	#waiters: Waiter[] = [];
 
-	#drainPromise: Promise<void> | null = null;
+	// Settle-once memoisation (ADR-0024 §4). `drain()` resolves externally
+	// (when the last holder releases — see `#completeDrain`), so its op
+	// returns a deferred whose resolver is parked in `#drainResolve`.
+	readonly #drainOnce = onceAsync((): Promise<void> => this.#beginDrain());
+	readonly #destroyOnce = onceAsync((): Promise<void> => this.#beginDestroy());
 	#drainResolve: (() => void) | null = null;
-	#destroyPromise: Promise<void> | null = null;
+
+	// `true` once `destroy()` has been requested — routes a concurrent or
+	// later `drain()` to await the (superseding) force-teardown instead of
+	// completing gracefully. A routing signal, not an idempotency flag: the
+	// settlement itself is `#destroyOnce`.
+	#destroying = false;
 
 	constructor(ctx: PoolContext) {
 		this.#ctx = ctx;
 	}
 
 	get state(): PoolState {
-		return this.#state;
+		return this.#sm.state;
 	}
 
 	get stats(): PoolStats {
@@ -77,8 +98,8 @@ export class SingleConnectionPool implements Pool {
 		// New acquires reject during draining / after destroy. In-flight
 		// acquires that have already entered the queue continue to be served
 		// per the "drain serves queued acquires" port contract (ADR-0011).
-		if (this.#state !== 'open') {
-			throw poolClosedError(this.#state);
+		if (!this.#sm.is('open')) {
+			throw poolClosedError(this.#sm.state as PoolClosedState);
 		}
 		if (signal?.aborted === true) {
 			throw abortErrorFromSignal(signal, { phase: 'pool-acquire' });
@@ -92,62 +113,61 @@ export class SingleConnectionPool implements Pool {
 	// per ADR-0011 / ADR-0018). An `async` wrapper here would create a new
 	// outer Promise on each call.
 	drain(): Promise<void> {
-		if (this.#destroyPromise !== null) {
-			return this.#destroyPromise;
-		}
-		if (this.#drainPromise !== null) {
-			return this.#drainPromise;
-		}
-		if (this.#state === 'destroyed') return Promise.resolve();
+		// A requested destroy supersedes a graceful drain — await the
+		// force-teardown rather than completing gracefully.
+		if (this.#destroying) return this.#destroyOnce();
+		if (this.#sm.is('destroyed')) return Promise.resolve();
+		return this.#drainOnce();
+	}
 
-		this.#state = 'draining';
+	destroy(): Promise<void> {
+		this.#destroying = true;
+		return this.#destroyOnce();
+	}
+
+	// ───────────────────────── internals ─────────────────────────
+
+	// `drain()`'s settle op: enter `draining` and return a promise that
+	// resolves once the slot drains (`#completeDrain` calls the parked
+	// resolver). If nothing is in flight, complete inline.
+	#beginDrain(): Promise<void> {
+		this.#sm.to('draining');
 		const { promise, resolve } = withResolvers<void>();
-		this.#drainPromise = promise;
 		this.#drainResolve = resolve;
-
 		// If the slot is already idle and no waiters are queued, finish drain
 		// inline; otherwise the last `#releaseSlot()` will trigger it.
 		if (!this.#inUse && this.#waiters.length === 0) {
 			void this.#completeDrain();
 		}
-
-		return this.#drainPromise;
+		return promise;
 	}
 
-	// See `drain()` — non-async for the same idempotency reason.
-	destroy(): Promise<void> {
-		if (this.#destroyPromise !== null) {
-			return this.#destroyPromise;
+	// `destroy()`'s settle op: force-teardown from any state. Flip to
+	// `destroyed` (synchronously, ahead of the async close), reject queued
+	// waiters, close the held connection, and unblock any in-flight drain.
+	async #beginDestroy(): Promise<void> {
+		this.#sm.to('destroyed');
+
+		// Reject everyone waiting in the queue. Force-close abandons the
+		// drain semantics so queued acquires don't get to land.
+		const queued = this.#waiters.splice(0);
+		for (const w of queued) {
+			w.cleanup();
+			w.reject(poolClosedError('destroyed'));
 		}
 
-		this.#destroyPromise = (async () => {
-			this.#state = 'destroyed';
+		// Close the held connection if any. This aborts whatever execute
+		// the current holder (if any) is running — they observe a driver
+		// error or a connection-close event from inside their stream.
+		if (this.#connection !== null) {
+			const conn = this.#connection;
+			this.#connection = null;
+			await conn.close().catch(swallow);
+		}
 
-			// Reject everyone waiting in the queue. Force-close abandons the
-			// drain semantics so queued acquires don't get to land.
-			const queued = this.#waiters.splice(0);
-			for (const w of queued) {
-				w.cleanup();
-				w.reject(poolClosedError('destroyed'));
-			}
-
-			// Close the held connection if any. This aborts whatever execute
-			// the current holder (if any) is running — they observe a driver
-			// error or a connection-close event from inside their stream.
-			if (this.#connection !== null) {
-				const conn = this.#connection;
-				this.#connection = null;
-				await conn.close().catch(swallow);
-			}
-
-			// Resolve any in-flight drain Promise so awaiters complete.
-			this.#drainResolve?.();
-		})();
-
-		return this.#destroyPromise;
+		// Resolve any in-flight drain Promise so awaiters complete.
+		this.#drainResolve?.();
 	}
-
-	// ───────────────────────── internals ─────────────────────────
 
 	async #takeSlot(signal: AbortSignal | undefined): Promise<Connection> {
 		// Fast path: the slot is free, take it now.
@@ -156,7 +176,7 @@ export class SingleConnectionPool implements Pool {
 			try {
 				const conn = await this.#establishConnection();
 				// Race window: destroy() may have run while we were establishing.
-				if (this.#state === 'destroyed') {
+				if (this.#sm.is('destroyed')) {
 					await this.#dropEstablished(conn);
 					throw poolClosedError('destroyed');
 				}
@@ -250,7 +270,7 @@ export class SingleConnectionPool implements Pool {
 	#dispatchNext(): void {
 		// If we're already destroyed, anything left in the queue at this
 		// point is from a TOCTOU race and gets rejected.
-		if (this.#state === 'destroyed') {
+		if (this.#sm.is('destroyed')) {
 			const queued = this.#waiters.splice(0);
 			for (const w of queued) {
 				w.cleanup();
@@ -263,7 +283,7 @@ export class SingleConnectionPool implements Pool {
 		if (next === undefined) {
 			// No one waiting. If we're draining and the slot is idle,
 			// graceful shutdown completes here.
-			if (this.#state === 'draining' && !this.#inUse) {
+			if (this.#sm.is('draining') && !this.#inUse) {
 				void this.#completeDrain();
 			}
 			return;
@@ -275,7 +295,7 @@ export class SingleConnectionPool implements Pool {
 		// Establish runs async; resolve the waiter when it lands.
 		this.#establishConnection().then(
 			async (conn) => {
-				if (this.#state === 'destroyed') {
+				if (this.#sm.is('destroyed')) {
 					// Pool destroyed during establish; discard the connection
 					// rather than hand it to a waiter who can't use it.
 					await this.#dropEstablished(conn);
@@ -299,7 +319,7 @@ export class SingleConnectionPool implements Pool {
 
 	async #completeDrain(): Promise<void> {
 		// Idempotency: drain may also race with destroy.
-		if (this.#state === 'destroyed') {
+		if (this.#sm.is('destroyed')) {
 			this.#drainResolve?.();
 			return;
 		}
@@ -308,7 +328,7 @@ export class SingleConnectionPool implements Pool {
 			this.#connection = null;
 			await conn.close().catch(swallow);
 		}
-		this.#state = 'destroyed';
+		this.#sm.to('destroyed');
 		this.#drainResolve?.();
 	}
 
@@ -326,7 +346,7 @@ export class SingleConnectionPool implements Pool {
 
 			// Pool was force-destroyed while we were holding: the connection
 			// is already closed and our slot is already accounted for.
-			if (this.#state === 'destroyed') return;
+			if (this.#sm.is('destroyed')) return;
 
 			try {
 				await this.#runOnRelease(conn);
@@ -351,7 +371,7 @@ export class SingleConnectionPool implements Pool {
 
 			// If the pool itself is destroyed, slot bookkeeping is already
 			// handled. Otherwise advance the queue.
-			if (this.#state !== 'destroyed') {
+			if (!this.#sm.is('destroyed')) {
 				this.#releaseSlot();
 			}
 		};

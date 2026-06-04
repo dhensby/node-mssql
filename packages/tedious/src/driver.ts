@@ -8,15 +8,16 @@
  * (integrated, accessToken, tokenProvider, encrypt, instance, appName,
  * etc.) lands in round-out commits.
  *
- * Connect errors are wrapped in `ConnectionError({ cause })` for the
- * MVP. Round-out maps tedious's error taxonomy to the full core taxonomy
- * (`ConnectionError` / `CredentialError` / `QueryError` / `ConstraintError`).
+ * Native tedious errors are translated to the core `MssqlError` taxonomy
+ * at this port boundary (ADR-0010 / ADR-0017): connect failures map to
+ * `ConnectionError` / `CredentialError` via `mapConnectError` (see
+ * `errors.ts`), with the native error preserved on `.cause`. Request,
+ * transaction, and reset errors are translated in `connection.ts`.
  */
 
 import { Connection as TediousConnection, type ConnectionConfiguration } from 'tedious';
 import {
 	type Connection,
-	ConnectionError,
 	CredentialError,
 	type Credential,
 	type Driver,
@@ -25,6 +26,7 @@ import {
 	type Transport,
 } from '@tediousjs/mssql-core';
 import { TediousConnectionWrapper } from './connection.js';
+import { mapConnectError } from './errors.js';
 
 export function tediousDriver(): Driver {
 	return {
@@ -32,9 +34,12 @@ export function tediousDriver(): Driver {
 		// Type registry will populate when ADR-0019's SqlType<T> system lands.
 		types: {},
 		async open(opts: DriverOptions): Promise<Connection> {
+			// Resolve the id up-front so a connect failure can carry it as
+			// `connectionId` on the produced `ConnectionError` (ADR-0016).
+			const id = opts.id ?? nextId('conn');
 			const config = translateOptions(opts);
-			const conn = await openTedious(config);
-			return new TediousConnectionWrapper(conn, opts.id ?? nextId('conn'));
+			const conn = await openTedious(config, id);
+			return new TediousConnectionWrapper(conn, id);
 		},
 	};
 }
@@ -81,15 +86,19 @@ function translateTransportOptions(transport: Transport): NonNullable<Connection
 	return options;
 }
 
-async function openTedious(config: ConnectionConfiguration): Promise<TediousConnection> {
+async function openTedious(
+	config: ConnectionConfiguration,
+	connectionId: string,
+): Promise<TediousConnection> {
 	const conn = new TediousConnection(config);
 	return new Promise<TediousConnection>((resolve, reject) => {
 		// `connect(callback)` is the canonical tedious shape — no race
 		// between `connect` / `error` event listeners, and the callback
-		// fires exactly once.
+		// fires exactly once. A login failure surfaces as `CredentialError`,
+		// any other connect failure as `ConnectionError` (mapConnectError).
 		conn.connect((err: Error | undefined) => {
 			if (err !== undefined && err !== null) {
-				reject(new ConnectionError('failed to connect', { cause: err }));
+				reject(mapConnectError(err, { connectionId }));
 				return;
 			}
 			resolve(conn);

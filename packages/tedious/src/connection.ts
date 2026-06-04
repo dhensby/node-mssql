@@ -28,6 +28,7 @@ import type {
 	TxOptions,
 } from '@tediousjs/mssql-core';
 import { EventBridge } from './event-bridge.js';
+import { mapConnectError, mapQueryError, mapTransactionError } from './errors.js';
 import { inferParameterType } from './parameter-types.js';
 
 // Map core's lowercase ADR-0006 isolation level strings to tedious's
@@ -95,6 +96,7 @@ export class TediousConnectionWrapper
 
 	execute(req: ExecuteRequest, signal?: AbortSignal): AsyncIterable<ResultEvent> {
 		const conn = this.#conn;
+		const connectionId = this.id;
 
 		// tedious delivers request / SQL errors for execSql / execSqlBatch
 		// through this completion callback — NOT an `'error'` event (that
@@ -166,6 +168,13 @@ export class TediousConnectionWrapper
 				) {
 					yield event;
 				}
+			} catch (err) {
+				// A signal-abort propagates unmapped: the kernel owns
+				// `AbortError` / `TimeoutError` and the `phase` stamp
+				// (ADR-0013 / ADR-0017). Everything else is a tedious
+				// native error to translate into the core taxonomy.
+				if (signal?.aborted) throw err;
+				throw mapQueryError(err, { connectionId });
 			} finally {
 				// `await` is load-bearing: `bridge.destroy()` waits for tedious's
 				// cancel-ack (`requestCompleted`) before resolving. Without
@@ -192,7 +201,7 @@ export class TediousConnectionWrapper
 	async reset(): Promise<void> {
 		return new Promise<void>((resolve, reject) => {
 			this.#conn.reset((err) => {
-				if (err !== undefined && err !== null) reject(err);
+				if (err !== undefined && err !== null) reject(mapConnectError(err, { connectionId: this.id }));
 				else resolve();
 			});
 		});
@@ -204,7 +213,7 @@ export class TediousConnectionWrapper
 		// is the portable answer.
 		await new Promise<void>((resolve, reject) => {
 			const request = new TediousRequest('SELECT 1', (err) => {
-				if (err !== undefined && err !== null) reject(err);
+				if (err !== undefined && err !== null) reject(mapQueryError(err, { connectionId: this.id }));
 				else resolve();
 			});
 			this.#conn.execSql(request);
@@ -228,7 +237,7 @@ export class TediousConnectionWrapper
 				: undefined;
 			this.#conn.beginTransaction(
 				(err) => {
-					if (err !== undefined && err !== null) reject(err);
+					if (err !== undefined && err !== null) reject(mapTransactionError(err, { connectionId: this.id }));
 					else resolve();
 				},
 				opts?.name ?? '',
@@ -240,7 +249,7 @@ export class TediousConnectionWrapper
 	async commit(): Promise<void> {
 		return new Promise<void>((resolve, reject) => {
 			this.#conn.commitTransaction((err) => {
-				if (err !== undefined && err !== null) reject(err);
+				if (err !== undefined && err !== null) reject(mapTransactionError(err, { connectionId: this.id }));
 				else resolve();
 			});
 		});
@@ -249,7 +258,7 @@ export class TediousConnectionWrapper
 	async rollback(): Promise<void> {
 		return new Promise<void>((resolve, reject) => {
 			this.#conn.rollbackTransaction((err) => {
-				if (err !== undefined && err !== null) reject(err);
+				if (err !== undefined && err !== null) reject(mapTransactionError(err, { connectionId: this.id }));
 				else resolve();
 			});
 		});
@@ -259,7 +268,7 @@ export class TediousConnectionWrapper
 		assertSafeSavepointName(name);
 		return new Promise<void>((resolve, reject) => {
 			this.#conn.saveTransaction((err) => {
-				if (err !== undefined && err !== null) reject(err);
+				if (err !== undefined && err !== null) reject(mapTransactionError(err, { connectionId: this.id }));
 				else resolve();
 			}, name);
 		});
@@ -273,7 +282,7 @@ export class TediousConnectionWrapper
 		// here to roll back to the savepoint.
 		return new Promise<void>((resolve, reject) => {
 			this.#conn.rollbackTransaction((err) => {
-				if (err !== undefined && err !== null) reject(err);
+				if (err !== undefined && err !== null) reject(mapTransactionError(err, { connectionId: this.id }));
 				else resolve();
 			}, name);
 		});

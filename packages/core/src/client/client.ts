@@ -79,18 +79,24 @@ export interface ClientClosePayload {
 }
 
 /**
- * The typed event surface on {@link Client}. One event —  `'close'` —
- * fires once per Client lifetime when the Client transitions to
- * `'destroyed'`. No `'error'` event: connect failures arrive on the
- * `connect()` Promise rejection AND on `close({ reason: 'connect-failure', error })`,
- * and a runtime error during a query reaches the consumer's
- * `await` on the terminal — `EventEmitter` is not involved.
+ * The typed event surface on {@link Client}, mirroring native streams:
+ * `'draining'` fires (no payload) when a graceful `close()` of an open
+ * client enters the draining phase, and `'close'` fires once per Client
+ * lifetime on the terminal transition to `'destroyed'`. A force `destroy()`
+ * (and `close()` of a never-connected client) goes straight to destroyed,
+ * so it emits only `'close'`. No `'error'` event: connect failures arrive
+ * on the `connect()` Promise rejection AND on
+ * `close({ reason: 'connect-failure', error })`, and a runtime error during
+ * a query reaches the consumer's `await` on the terminal — `EventEmitter`
+ * is not involved.
  *
  * Cross-cutting transition observability lives on the
- * `mssql:client:state-change` `diagnostics_channel`; per-instance
- * close handling is here.
+ * `mssql:client:state-change` `diagnostics_channel`; per-instance event
+ * handling is here.
  */
 export interface ClientEvents {
+	/** A graceful `close()` of an open client has begun draining (no payload). */
+	draining: []
 	close: [ClientClosePayload]
 }
 
@@ -274,6 +280,12 @@ export class Client extends EventEmitter<ClientEvents> implements AsyncDisposabl
 	// (already done) → `'close'` event → `state-change` channel → the
 	// originating Promise settles last.
 	#onTransition(from: ClientState, to: ClientState): void {
+		// `'draining'` fires on the graceful `open → draining` edge (close()
+		// of an open client). destroy() and close()-of-pending skip draining
+		// (straight to destroyed), so they emit only `'close'`.
+		if (to === 'draining') {
+			this.emit('draining');
+		}
 		// `'close'` fires only on the terminal transition, and only when a
 		// reason was supplied. There's no `'error'` event by design
 		// (ADR-0018) — connect failures arrive on the `connect()` Promise

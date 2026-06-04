@@ -308,3 +308,53 @@ describe('Client — no error event surface', () => {
 		assert.equal(sawErrorEvent, false, 'no error event fired');
 	});
 });
+
+// ─── 'draining' event (#14) ────────────────────────────────────────────────
+
+describe('Client — draining event', () => {
+	test('close() of an open client emits draining then close', async () => {
+		const client = createClient({ driver: fakeDriver(), ...baseConfig });
+		await client.connect();
+		const order: string[] = [];
+		client.on('draining', () => order.push('draining'));
+		client.on('close', () => order.push('close'));
+		await client.close();
+		assert.deepEqual(order, ['draining', 'close']);
+	});
+
+	test('the draining handler observes state === "draining"', async () => {
+		const client = createClient({ driver: fakeDriver(), ...baseConfig });
+		await client.connect();
+		let stateAtFire: ClientState | null = null;
+		client.on('draining', () => { stateAtFire = client.state; });
+		await client.close();
+		assert.equal(stateAtFire, 'draining');
+	});
+
+	test('destroy() of an open client does NOT emit draining (only close)', async () => {
+		const client = createClient({ driver: fakeDriver(), ...baseConfig });
+		await client.connect();
+		let draining = 0;
+		client.on('draining', () => draining++);
+		await client.destroy();
+		assert.equal(draining, 0);
+	});
+
+	test('close() of a never-connected client does NOT emit draining', async () => {
+		const client = createClient({ driver: fakeDriver(), ...baseConfig });
+		let draining = 0;
+		client.on('draining', () => draining++);
+		await client.close();
+		assert.equal(draining, 0);
+	});
+
+	test('draining fires at most once across repeated close()', async () => {
+		const client = createClient({ driver: fakeDriver(), ...baseConfig });
+		await client.connect();
+		let count = 0;
+		client.on('draining', () => count++);
+		await client.close();
+		await client.close();
+		assert.equal(count, 1);
+	});
+});

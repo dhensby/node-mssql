@@ -82,7 +82,7 @@ const ALREADY_CONSUMED =
 	'Query already consumed. Each Query<T> is single-consumption; build a new Query (call the tag again) to re-run.';
 
 const DISPOSED =
-	'Query has been disposed. Calling a terminal on a disposed Query is not allowed (ADR-0008).';
+	'Query has been disposed. Calling a terminal on a disposed Query is not allowed.';
 
 const META_BEFORE_TERMINATION =
 	'Query.meta() called before the stream terminated. ' +

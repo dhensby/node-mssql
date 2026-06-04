@@ -63,7 +63,7 @@ export function inferParameterType(value: unknown): InferredParameter {
 	}
 	throw new TypeError(
 		`cannot infer SQL type for parameter value of JS type '${typeof value}'. ` +
-			`The proper SqlType<T> system (ADR-0019) lands in a round-out commit; ` +
+			`The proper SqlType<T> system lands in a round-out commit; ` +
 			`for now, use one of: string, number, bigint, boolean, Date, Uint8Array, null/undefined.`,
 	);
 }

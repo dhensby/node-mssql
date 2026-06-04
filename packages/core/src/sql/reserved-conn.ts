@@ -37,7 +37,7 @@ import {
 } from './transaction.js';
 
 const RELEASED =
-	'ReservedConn has been released. Calling a tag on a released connection is not allowed (ADR-0008).';
+	'ReservedConn has been released. Calling a tag on a released connection is not allowed.';
 
 const SIGNAL_AFTER_START =
 	'signal() called on an in-flight or settled acquire — set the signal before awaiting the builder.';

@@ -49,13 +49,13 @@ import { pinnedConnection } from './reserved-conn.js';
 import { makeSqlTag, type SqlTag, type UnsafeParams } from './tag.js';
 
 const TX_NOT_OPEN = (state: TransactionState): string =>
-	`Transaction is ${state}. Calling a tag or lifecycle method on a settled transaction is not allowed (ADR-0008).`;
+	`Transaction is ${state}. Calling a tag or lifecycle method on a settled transaction is not allowed.`;
 
 const TX_SETTLING =
-	'Transaction is settling (commit or rollback in progress). No further queries, savepoints, or lifecycle calls are allowed (ADR-0008).';
+	'Transaction is settling (commit or rollback in progress). No further queries, savepoints, or lifecycle calls are allowed.';
 
 const SP_SPENT = (state: SavepointState): string =>
-	`Savepoint has been ${state} — it is no longer on the transaction's stack and cannot be rolled back to or released again (ADR-0006).`;
+	`Savepoint has been ${state} — it is no longer on the transaction's stack and cannot be rolled back to or released again.`;
 
 const NO_SAVEPOINT = (verb: string, name?: string): string =>
 	name !== undefined

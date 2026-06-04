@@ -107,12 +107,12 @@ describe('inferParameterType — date and binary', () => {
 });
 
 describe('inferParameterType — unsupported types', () => {
-	test('plain object throws TypeError pointing at ADR-0019', () => {
+	test('plain object throws a TypeError for an unsupported type', () => {
 		assert.throws(
 			() => inferParameterType({ x: 1 }),
 			(err: unknown) => {
 				assert.ok(err instanceof TypeError);
-				assert.match((err).message, /ADR-0019/);
+				assert.match(err.message, /cannot infer SQL type/);
 				return true;
 			},
 		);

@@ -3,4 +3,5 @@
 // part of the published API.
 
 export * from './once-async.js';
+export * from './state-machine.js';
 export * from './with-resolvers.js';

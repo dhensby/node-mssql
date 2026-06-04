@@ -33,6 +33,7 @@ import type {
 	ResultEvent,
 	TxOptions,
 } from '../../src/index.js';
+import { withResolvers } from '../../src/util/index.js';
 
 // ─── fakeConnection ─────────────────────────────────────────────────────────
 
@@ -87,9 +88,9 @@ export class FakeConnection extends EventEmitter<ConnectionEvents> implements Co
 
 	/** Hold the next `execute()` in flight until the returned fn is called. */
 	holdNextExecute(): () => void {
-		let release!: () => void;
-		this.#executeGate = new Promise<void>((res) => { release = res; });
-		return release;
+		const { promise, resolve } = withResolvers<void>();
+		this.#executeGate = promise;
+		return resolve;
 	}
 
 	#enter(label: string): void {

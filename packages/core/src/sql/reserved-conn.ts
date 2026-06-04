@@ -28,6 +28,7 @@
 import type { Connection, ExecuteRequest, IsolationLevel, ResultEvent } from '../driver/index.js';
 import type { PooledConnection } from '../pool/index.js';
 import type { Query, RequestRunner } from '../query/index.js';
+import { withResolvers } from '../util/index.js';
 import { makeSqlTag, type SqlTag, type UnsafeParams } from './tag.js';
 import {
 	DEFAULT_ISOLATION_LEVEL,
@@ -212,9 +213,9 @@ export function pinnedConnection(connection: Connection): PinnedConnection {
 	// (control ops) so both interleave on the one queue.
 	const reserve = (): { prev: Promise<void>; done: () => void } => {
 		const prev = lastSettled;
-		let done!: () => void;
-		lastSettled = new Promise<void>((res) => { done = res; });
-		return { prev, done };
+		const { promise, resolve } = withResolvers<void>();
+		lastSettled = promise;
+		return { prev, done: resolve };
 	};
 
 	return {

@@ -20,6 +20,7 @@
 
 import type { Connection } from '../driver/index.js';
 import { abortErrorFromSignal, PoolClosedError } from '../errors/index.js';
+import { withResolvers } from '../util/index.js';
 import type { PoolContext, PoolFactory, PoolOptions } from './factory.js';
 import type { Pool, PooledConnection, PoolState, PoolStats } from './pool.js';
 
@@ -100,9 +101,9 @@ export class SingleConnectionPool implements Pool {
 		if (this.#state === 'destroyed') return Promise.resolve();
 
 		this.#state = 'draining';
-		this.#drainPromise = new Promise<void>((res) => {
-			this.#drainResolve = res;
-		});
+		const { promise, resolve } = withResolvers<void>();
+		this.#drainPromise = promise;
+		this.#drainResolve = resolve;
 
 		// If the slot is already idle and no waiters are queued, finish drain
 		// inline; otherwise the last `#releaseSlot()` will trigger it.
@@ -171,28 +172,28 @@ export class SingleConnectionPool implements Pool {
 		}
 
 		// Slow path: the slot is in use — queue and wait for handoff.
-		return await new Promise<Connection>((resolve, reject) => {
-			let onAbort: (() => void) | undefined;
-			const waiter: Waiter = {
-				resolve,
-				reject,
-				cleanup: () => {
-					if (signal !== undefined && onAbort !== undefined) {
-						signal.removeEventListener('abort', onAbort);
-					}
-				},
+		const { promise, resolve, reject } = withResolvers<Connection>();
+		let onAbort: (() => void) | undefined;
+		const waiter: Waiter = {
+			resolve,
+			reject,
+			cleanup: () => {
+				if (signal !== undefined && onAbort !== undefined) {
+					signal.removeEventListener('abort', onAbort);
+				}
+			},
+		};
+		if (signal !== undefined) {
+			onAbort = (): void => {
+				const idx = this.#waiters.indexOf(waiter);
+				if (idx >= 0) this.#waiters.splice(idx, 1);
+				waiter.cleanup();
+				reject(abortErrorFromSignal(signal, { phase: 'pool-acquire' }));
 			};
-			if (signal !== undefined) {
-				onAbort = (): void => {
-					const idx = this.#waiters.indexOf(waiter);
-					if (idx >= 0) this.#waiters.splice(idx, 1);
-					waiter.cleanup();
-					reject(abortErrorFromSignal(signal, { phase: 'pool-acquire' }));
-				};
-				signal.addEventListener('abort', onAbort, { once: true });
-			}
-			this.#waiters.push(waiter);
-		});
+			signal.addEventListener('abort', onAbort, { once: true });
+		}
+		this.#waiters.push(waiter);
+		return await promise;
 	}
 
 	// Returns a healthy, hook-applied Connection or throws. Implements the

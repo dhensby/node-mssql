@@ -32,6 +32,7 @@
 
 import type { ColumnMetadata, ExecuteRequest, ResultEvent } from '../driver/index.js';
 import { MultipleRowsetsError } from '../errors/index.js';
+import { withResolvers } from '../util/index.js';
 import type { EnvChange, InfoMessage, QueryMeta } from './meta.js';
 import { Rowsets } from './rowsets.js';
 import type { RequestRunner } from './runner.js';
@@ -374,10 +375,10 @@ export class Query<T = unknown> implements
 		}
 		// Set up the pending Promise and (if no terminal has fired yet)
 		// kick off the shape-only pump.
-		this.#columnsPromise = new Promise<readonly ColumnMetadata[]>((resolve, reject) => {
-			this.#columnsResolve = resolve;
-			this.#columnsReject = reject;
-		});
+		const { promise, resolve, reject } = withResolvers<readonly ColumnMetadata[]>();
+		this.#columnsPromise = promise;
+		this.#columnsResolve = resolve;
+		this.#columnsReject = reject;
 		if (!this.#consumed && this.#shapePumpPromise === null) {
 			this.#shapePumpPromise = this.#runShapePump();
 		}
@@ -515,9 +516,9 @@ export class Query<T = unknown> implements
 	// termination promise is paired with its lifetime.
 	#ensureRunnerIter(): AsyncIterator<ResultEvent> {
 		if (this.#runnerIter !== null) return this.#runnerIter;
-		this.#terminationPromise = new Promise<void>((res) => {
-			this.#terminationResolve = res;
-		});
+		const { promise, resolve } = withResolvers<void>();
+		this.#terminationPromise = promise;
+		this.#terminationResolve = resolve;
 		this.#runnerIter = this.#runner.run(
 			this.#request,
 			this.#composedSignal(),

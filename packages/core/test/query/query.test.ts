@@ -23,7 +23,7 @@ describe('Query — construction & lazy execution', () => {
 	test('constructing a Query does not invoke the runner', () => {
 		const { runner } = fakeRunner([]);
 		new Query({ runner, request: stmt('SELECT 1') });
-		assert.equal(runner.run.mock.callCount(), 0, 'runner was not called at construction');
+		assert.equal(runner.run.mock.callCount(), 0, 'the runner should not be called at construction');
 	});
 
 	test('runner is invoked when a terminal fires', async () => {
@@ -49,10 +49,10 @@ describe('Query — construction & lazy execution', () => {
 		const ac = new AbortController();
 		await new Query({ runner, request: stmt('SELECT 1'), signal: ac.signal }).all();
 		const runnerSignal = runner.run.mock.calls[0]!.arguments[1];
-		assert.ok(runnerSignal !== undefined, 'runner received a signal');
+		assert.ok(runnerSignal !== undefined, 'the runner should receive a signal');
 		assert.equal(runnerSignal.aborted, false);
 		ac.abort();
-		assert.equal(runnerSignal.aborted, true, 'consumer abort propagated to runner signal');
+		assert.equal(runnerSignal.aborted, true, 'the consumer abort should propagate to the runner signal');
 	});
 });
 
@@ -140,8 +140,8 @@ describe('Query.all() — single rowset', () => {
 			request: stmt('SELECT d, b, n FROM t'),
 		}).all();
 		assert.equal(rows.length, 1);
-		assert.equal(rows[0]!.d, date, 'Date passed through');
-		assert.equal(rows[0]!.b, buf, 'Uint8Array passed through');
+		assert.equal(rows[0]!.d, date, 'the Date should pass through unchanged');
+		assert.equal(rows[0]!.b, buf, 'the Uint8Array should pass through unchanged');
 		assert.equal(rows[0]!.n, null);
 	});
 });
@@ -160,7 +160,7 @@ describe('Query.all() — duplicate column names', () => {
 			runner,
 			request: stmt('SELECT a.id, b.id FROM a JOIN b ON ...'),
 		}).all();
-		assert.deepEqual(rows, [{ id: 2 }], 'last-wins: b.id overwrites a.id');
+		assert.deepEqual(rows, [{ id: 2 }], 'last-wins: b.id should overwrite a.id');
 	});
 });
 
@@ -189,7 +189,7 @@ describe('Query — single-consumption', () => {
 		await q.all();
 		assert.equal(runner.run.mock.callCount(), 1);
 		await assert.rejects(() => q.all(), TypeError);
-		assert.equal(runner.run.mock.callCount(), 1, 'second call did not invoke runner');
+		assert.equal(runner.run.mock.callCount(), 1, 'the second call should not invoke the runner');
 	});
 });
 
@@ -253,7 +253,7 @@ describe('Query — error propagation and release', () => {
 	test('runner try/finally fires on natural drain (release-on-end)', async () => {
 		const { runner, release } = fakeRunner([{ kind: 'done' }]);
 		await new Query({ runner, request: stmt('SELECT 1') }).all();
-		assert.equal(release.mock.callCount(), 1, 'try/finally ran exactly once');
+		assert.equal(release.mock.callCount(), 1, 'the runner try/finally should run exactly once');
 	});
 
 	test('runner try/finally fires on stream error (release-on-error)', async () => {
@@ -274,7 +274,7 @@ describe('Query — error propagation and release', () => {
 			() => new Query({ runner, request: stmt('SELECT a') }).all(),
 			/mid-stream failure/,
 		);
-		assert.equal(log.releases, 1, 'finally ran despite error');
+		assert.equal(log.releases, 1, 'the finally should run despite the error');
 	});
 
 	test('runner try/finally fires when MultipleRowsetsError throws inside Query', async () => {
@@ -304,7 +304,7 @@ describe('Query — error propagation and release', () => {
 		assert.equal(
 			log.releases,
 			1,
-			'for-await loop calling iter.return() on Query-internal throw triggers the runner finally',
+			'expected the for-await loop\'s iter.return() on a Query-internal throw to trigger the runner finally',
 		);
 	});
 });
@@ -360,7 +360,7 @@ describe('Query.iterate() — streaming row consumption', () => {
 			if (n === 1) break;
 		}
 		assert.equal(n, 1);
-		assert.equal(release.mock.callCount(), 1, 'runner finally fired on break');
+		assert.equal(release.mock.callCount(), 1, 'the runner finally should fire on break');
 	});
 
 	test('throws MultipleRowsetsError on a second metadata token', async () => {
@@ -532,7 +532,7 @@ describe('Query.meta() — trailer access', () => {
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await assert.rejects(() => q.all(), /connection lost/);
 		const meta = q.meta();
-		assert.equal(meta.completed, false, 'completed=false on abnormal exit');
+		assert.equal(meta.completed, false, 'completed should be false on abnormal exit');
 		// Trailer up to the error point is preserved.
 		assert.deepEqual(meta.rowsAffectedPerStatement, []);
 	});
@@ -651,7 +651,7 @@ describe('Query — cancel-then-settle ordering (regression)', () => {
 		// resolved here, it would be returning before the runner stream
 		// settled — and the surrounding poolRunner's `await using`
 		// would release the connection mid-cleanup.
-		assert.equal(order[0], 'abort-handled', 'abort handler ran');
+		assert.equal(order[0], 'abort-handled', 'the abort handler should have run');
 		assert.equal(
 			cancelResolved,
 			false,
@@ -795,7 +795,7 @@ describe('Query — trailer event accumulation', () => {
 		assert.equal(aQ.meta().info.length, 1);
 		assert.equal(aQ.meta().print.length, 1);
 		assert.equal(aQ.meta().returnValue, 7);
-		assert.equal(a.length, 1, 'rows still drained');
+		assert.equal(a.length, 1, 'rows should still be drained');
 
 		const rQ = new Query({
 			runner: fakeRunner([...events]).runner,
@@ -829,7 +829,7 @@ describe('Query.raw() — view toggle', () => {
 		]);
 		const q = new Query<{ n: number }>({ runner, request: stmt('SELECT n') });
 		const r = q.raw<[number]>();
-		assert.notEqual(q, r, '.raw() returned a new Query');
+		assert.notEqual(q, r, '.raw() should return a new Query');
 		// Original is still consumable.
 		const objs = await q;
 		assert.deepEqual(objs, [{ n: 1 }]);
@@ -861,14 +861,14 @@ describe('Query.raw() — view toggle', () => {
 		]);
 		const q = new Query({ runner, request: stmt('SELECT a.id, b.id') });
 		const rows = await q.raw<[number, number]>();
-		assert.deepEqual(rows, [[1, 2]], 'both duplicate-named columns preserved');
+		assert.deepEqual(rows, [[1, 2]], 'both duplicate-named columns should be preserved');
 	});
 
 	test('.raw() does not invoke the runner (lazy)', () => {
 		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		q.raw();
-		assert.equal(runner.run.mock.callCount(), 0, 'raw() did not start execution');
+		assert.equal(runner.run.mock.callCount(), 0, 'raw() should not start execution');
 	});
 
 	test('.raw() can be called any number of times — each call is a fresh Query', async () => {
@@ -951,7 +951,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 		// the iterator is left paused, awaiting either a row terminal or
 		// dispose().
 		assert.equal(runner.run.mock.callCount(), 1);
-		assert.equal(release.mock.callCount(), 0, 'iter left paused — runner finally not yet fired');
+		assert.equal(release.mock.callCount(), 0, 'the iterator should be left paused (runner finally not yet fired)');
 	});
 
 	test('resolves to the first-rowset metadata when called after a terminal', async () => {
@@ -978,7 +978,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 		const q = new Query({ runner, request: stmt('SELECT a') });
 		const p1 = q.columns();
 		const p2 = q.columns();
-		assert.equal(p1, p2, 'same Promise instance returned on repeat calls');
+		assert.equal(p1, p2, 'the same Promise instance should be returned on repeat calls');
 		await q.all();  // drive the stream so the promise resolves
 		assert.deepEqual(await p1, [{ name: 'a' }]);
 	});
@@ -1016,8 +1016,8 @@ describe('Query.columns() — first-rowset shape access', () => {
 		// Single runner.run() call across .columns() + .all() — the row
 		// terminal continued from the paused shape-pump iterator rather
 		// than starting a fresh stream.
-		assert.equal(runner.run.mock.callCount(), 1, 'shape pump + terminal share one runner.run() call');
-		assert.equal(release.mock.callCount(), 1, 'natural drain fired runner finally exactly once');
+		assert.equal(runner.run.mock.callCount(), 1, 'shape pump + terminal should share one runner.run() call');
+		assert.equal(release.mock.callCount(), 1, 'natural drain should fire the runner finally exactly once');
 	});
 
 	test('terminal after columns() sees metadata and rows in arrival order', async () => {
@@ -1235,7 +1235,7 @@ describe('Query.columns() — first-rowset shape access', () => {
 		const meta = await q.run();
 		assert.equal(meta.completed, true);
 		assert.equal(meta.rowsAffected, 1);
-		assert.equal(runner.run.mock.callCount(), 1, 'no second runner.run()');
+		assert.equal(runner.run.mock.callCount(), 1, 'there should be no second runner.run()');
 	});
 
 	test('.dispose() after .columns() (paused shape pump) fires runner finally exactly once', async () => {
@@ -1250,9 +1250,9 @@ describe('Query.columns() — first-rowset shape access', () => {
 		]);
 		const q = new Query({ runner, request: stmt('SELECT n') });
 		await q.columns();
-		assert.equal(release.mock.callCount(), 0, 'iter is paused after shape pump captures metadata');
+		assert.equal(release.mock.callCount(), 0, 'the iterator should be paused after the shape pump captures metadata');
 		await q.dispose();
-		assert.equal(release.mock.callCount(), 1, 'dispose triggered iter.return → runner finally');
+		assert.equal(release.mock.callCount(), 1, 'dispose should trigger iter.return → runner finally');
 	});
 });
 
@@ -1365,6 +1365,6 @@ describe('Query.cancel() / .dispose() — feature behaviour', () => {
 		await q.cancel();
 		await consumer;
 		const meta = q.meta();
-		assert.equal(meta.completed, false, 'completed=false on cancel');
+		assert.equal(meta.completed, false, 'completed should be false on cancel');
 	});
 });

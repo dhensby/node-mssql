@@ -120,7 +120,7 @@ describe('makeSqlTag — lazy execution', () => {
 		const { runner, captured } = makeCaptureRunner();
 		const sql = makeSqlTag(runner);
 		const _q = sql`SELECT 1`;
-		assert.equal(captured.length, 0, 'runner not called at tag invocation');
+		assert.equal(captured.length, 0, 'the runner should not be called at tag invocation');
 		assert.ok(_q instanceof Query);
 	});
 

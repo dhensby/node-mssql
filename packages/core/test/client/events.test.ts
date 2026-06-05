@@ -305,7 +305,7 @@ describe('Client — no error event surface', () => {
 		// the listener is purely a safety check that none escapes.
 		(client as unknown as EventEmitter).on('error', () => { sawErrorEvent = true; });
 		await assert.rejects(() => client.connect(), /boom/);
-		assert.equal(sawErrorEvent, false, 'no error event fired');
+		assert.equal(sawErrorEvent, false, 'there should be no error event to fire');
 	});
 });
 

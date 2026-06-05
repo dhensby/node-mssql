@@ -61,7 +61,7 @@ describe('sql.transaction() — builder shape', () => {
 			assert.equal(typeof tx.releaseSavepoint, 'function');
 			assert.equal(typeof tx[Symbol.asyncDispose], 'function');
 			assert.equal(tx.state, 'open');
-			assert.equal(pool.acquire.mock.callCount(), 1, 'acquire fired during BEGIN');
+			assert.equal(pool.acquire.mock.callCount(), 1, 'acquire should fire during BEGIN');
 			assert.equal(conn.beginTransaction.mock.callCount(), 1);
 		} finally {
 			await tx.rollback();
@@ -132,7 +132,7 @@ describe('sql.transaction() — builder shape', () => {
 		);
 		// Acquired but BEGIN errored — release must have fired.
 		assert.equal(pool.acquire.mock.callCount(), 1);
-		assert.equal(release.mock.callCount(), 1, 'connection released after BEGIN failure');
+		assert.equal(release.mock.callCount(), 1, 'the connection should be released after a BEGIN failure');
 	});
 
 	test('.signal() / .isolationLevel() after the builder has been awaited throw', async () => {
@@ -159,7 +159,7 @@ describe('Transaction — query execution', () => {
 			await tx`SELECT 2`;
 			await tx`SELECT 3`;
 			assert.equal(conn.execute.mock.callCount(), 3);
-			assert.equal(pool.acquire.mock.callCount(), 1, 'one acquire across BEGIN + 3 queries');
+			assert.equal(pool.acquire.mock.callCount(), 1, 'there should be one acquire across BEGIN + 3 queries');
 		} finally {
 			await tx.rollback();
 		}
@@ -239,7 +239,7 @@ describe('Transaction — lifecycle', () => {
 			await using _tx = await sql.transaction();
 			// fall off the scope without commit
 		}
-		assert.equal(conn.rollback.mock.callCount(), 1, 'dispose-without-commit ran rollback');
+		assert.equal(conn.rollback.mock.callCount(), 1, 'dispose-without-commit should run rollback');
 		assert.equal(release.mock.callCount(), 1);
 	});
 
@@ -250,7 +250,7 @@ describe('Transaction — lifecycle', () => {
 			await tx.commit();
 		}
 		assert.equal(conn.commit.mock.callCount(), 1);
-		assert.equal(conn.rollback.mock.callCount(), 0, 'no rollback after explicit commit');
+		assert.equal(conn.rollback.mock.callCount(), 0, 'there should be no rollback after an explicit commit');
 	});
 });
 
@@ -311,7 +311,7 @@ describe('Transaction — savepoints', () => {
 		try {
 			const sp = await tx.savepoint();
 			await sp.release();
-			assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'no ROLLBACK TO — release is app-layer');
+			assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'there should be no ROLLBACK TO (release is app-layer)');
 			assert.equal(sp.state, 'released');
 		} finally {
 			await tx.rollback();
@@ -327,7 +327,7 @@ describe('Transaction — savepoints', () => {
 				await using sp = await tx.savepoint();
 				captured = sp;
 			}  // dispose → release
-			assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'disposal did not roll back');
+			assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'disposal should not roll back');
 			assert.equal(captured.state, 'released');
 		} finally {
 			await tx.rollback();
@@ -396,7 +396,7 @@ describe('Transaction — savepoint stack', () => {
 			await sp1.rollback();  // ROLLBACK TO sp1 — discards everything after sp1, incl. sp2
 			assert.deepEqual(conn.rollbackToSavepoint.mock.calls.map((call) => call.arguments[0]), [sp1.name]);
 			assert.equal(sp1.state, 'rolled-back');
-			assert.equal(sp2.state, 'rolled-back', 'sp2 invalidated by the earlier rollback');
+			assert.equal(sp2.state, 'rolled-back', 'sp2 should be invalidated by the earlier rollback');
 			await assert.rejects(async () => { await sp2.rollback(); }, TypeError);
 		} finally {
 			await tx.rollback();
@@ -412,7 +412,7 @@ describe('Transaction — savepoint stack', () => {
 			await sp1.release();
 			assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0);
 			assert.equal(sp1.state, 'released');
-			assert.equal(sp2.state, 'released', 'sp2 dropped along with sp1');
+			assert.equal(sp2.state, 'released', 'sp2 should be dropped along with sp1');
 		} finally {
 			await tx.rollback();
 		}
@@ -489,8 +489,8 @@ describe('Transaction — settling with open savepoints', () => {
 		const sp = await tx.savepoint();
 		await tx.commit();
 		assert.equal(conn.commit.mock.callCount(), 1);
-		assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'no cascade of savepoint rollbacks');
-		assert.equal(sp.state, 'released', 'savepoint work kept by the commit');
+		assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'there should be no cascade of savepoint rollbacks');
+		assert.equal(sp.state, 'released', 'the savepoint work should be kept by the commit');
 		await assert.rejects(async () => { await sp.rollback(); }, TypeError);
 	});
 
@@ -500,7 +500,7 @@ describe('Transaction — settling with open savepoints', () => {
 		const sp = await tx.savepoint();
 		await tx.rollback();
 		assert.equal(conn.rollback.mock.callCount(), 1);
-		assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'no cascade of savepoint rollbacks');
+		assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'there should be no cascade of savepoint rollbacks');
 		assert.equal(sp.state, 'rolled-back');
 	});
 
@@ -531,7 +531,7 @@ describe('Transaction — concurrency safety', () => {
 		const { sql, conn } = makePool();
 		const tx = await sql.transaction();
 		await Promise.all([tx.commit(), tx.commit(), tx.commit()]);
-		assert.equal(conn.commit.mock.callCount(), 1, 'only one COMMIT reached the wire');
+		assert.equal(conn.commit.mock.callCount(), 1, 'exactly one COMMIT should reach the wire');
 		assert.equal(tx.state, 'committed');
 	});
 
@@ -547,8 +547,8 @@ describe('Transaction — concurrency safety', () => {
 		const { sql, conn } = makePool();
 		const tx = await sql.transaction();
 		await Promise.all([tx.commit(), tx.rollback()]);  // commit issued first
-		assert.equal(conn.commit.mock.callCount(), 1, 'commit (issued first) wins');
-		assert.equal(conn.rollback.mock.callCount(), 0, 'no rollback once a settle is in flight');
+		assert.equal(conn.commit.mock.callCount(), 1, 'commit (issued first) should win');
+		assert.equal(conn.rollback.mock.callCount(), 0, 'there should be no rollback once a settle is in flight');
 		assert.equal(tx.state, 'committed');
 	});
 
@@ -559,14 +559,14 @@ describe('Transaction — concurrency safety', () => {
 			void tx.commit();  // not awaited — disposal must await it, not roll back
 		}
 		assert.equal(conn.commit.mock.callCount(), 1);
-		assert.equal(conn.rollback.mock.callCount(), 0, 'disposal did not turn the commit into a rollback');
+		assert.equal(conn.rollback.mock.callCount(), 0, 'disposal should not turn the commit into a rollback');
 	});
 
 	test('a query issued after an unawaited commit() is rejected (settling)', async () => {
 		const { sql } = makePool();
 		const tx = await sql.transaction();
 		void tx.commit();  // settling — state still reads "open" until the wire lands
-		assert.throws(() => tx`SELECT 1`, TypeError, 'no new work once a settle is in flight');
+		assert.throws(() => tx`SELECT 1`, TypeError, 'there should be no new work once a settle is in flight');
 		await tx.commit();  // drain the in-flight commit
 	});
 
@@ -583,7 +583,7 @@ describe('Transaction — concurrency safety', () => {
 			]);
 			const savepointNames = conn.savepoint.mock.calls.map((call) => call.arguments[0]);
 			assert.equal(savepointNames.length, 3);
-			assert.equal(new Set([a.name, b.name, c.name]).size, 3, 'distinct marks');
+			assert.equal(new Set([a.name, b.name, c.name]).size, 3, 'marks should be distinct');
 			assert.deepEqual(savepointNames, [a.name, b.name, c.name]);
 		} finally {
 			await tx.rollback();
@@ -598,11 +598,11 @@ describe('Transaction — concurrency safety', () => {
 		await drain();                      // let the query reach the wire
 		const committed = tx.commit();
 		await drain();                      // give commit every chance to (wrongly) fire
-		assert.equal(conn.commit.mock.callCount(), 0, 'commit waits for the in-flight query');
+		assert.equal(conn.commit.mock.callCount(), 0, 'commit should wait for the in-flight query');
 		release();                          // let the query finish
 		await query;
 		await committed;
-		assert.equal(conn.commit.mock.callCount(), 1, 'commit ran once the query settled');
+		assert.equal(conn.commit.mock.callCount(), 1, 'commit should run once the query settled');
 		assert.equal(conn.execute.mock.callCount(), 1);
 		assert.equal(tx.state, 'committed');
 	});

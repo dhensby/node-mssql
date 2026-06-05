@@ -26,7 +26,7 @@ describe('object id generator', () => {
 		assert.ok(b.startsWith(prefix));
 		const aN = Number(a.slice(prefix.length));
 		const bN = Number(b.slice(prefix.length));
-		assert.ok(bN === aN + 1, `expected ${aN} + 1 === ${bN}`);
+		assert.ok(bN === aN + 1, `the next id should be ${aN} + 1, got ${bN}`);
 	});
 
 	test('counters are independent across prefixes', () => {

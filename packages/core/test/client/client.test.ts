@@ -30,7 +30,7 @@ describe('Client — construction', () => {
 		const driver = fakeDriver();
 		const client = createClient({ driver, ...baseConfig });
 		assert.equal(client.state, 'pending');
-		assert.equal(driver.open.mock.callCount(), 0, 'driver.open not called at construction');
+		assert.equal(driver.open.mock.callCount(), 0, 'driver.open() should not be called at construction');
 	});
 
 	test('exposes a `sql` tagged-template callable from construction', () => {
@@ -48,7 +48,7 @@ describe('Client.connect()', () => {
 		const client = createClient({ driver, ...baseConfig });
 		await client.connect();
 		assert.equal(client.state, 'open');
-		assert.equal(driver.open.mock.callCount(), 1, 'driver.open called once during connect()');
+		assert.equal(driver.open.mock.callCount(), 1, 'driver.open() should be called once during connect()');
 	});
 
 	test('threads the credential + transport through to driver.open()', async () => {
@@ -74,7 +74,7 @@ describe('Client.connect()', () => {
 		await client.connect();
 		await client.connect();
 		assert.equal(client.state, 'open');
-		assert.equal(driver.open.mock.callCount(), 1, 'no second open');
+		assert.equal(driver.open.mock.callCount(), 1, 'there should be no second driver.open() (connection reused)');
 	});
 
 	test('connect() failure transitions state to destroyed (terminal) and surfaces the error', async () => {
@@ -170,7 +170,7 @@ describe('Client.close()', () => {
 		const client = createClient({ driver, ...baseConfig });
 		await client.close();
 		assert.equal(client.state, 'destroyed');
-		assert.equal(driver.open.mock.callCount(), 0, 'driver.open never called');
+		assert.equal(driver.open.mock.callCount(), 0, 'driver.open() should never be called');
 	});
 
 	test('close() on a destroyed client is idempotent (resolved Promise, no error)', async () => {
@@ -192,7 +192,7 @@ describe('Client.destroy()', () => {
 		await client.connect();
 		await client.destroy();
 		assert.equal(client.state, 'destroyed');
-		assert.equal(conn!.close.mock.callCount(), 1, 'underlying connection closed');
+		assert.equal(conn!.close.mock.callCount(), 1, 'the underlying connection should be closed');
 	});
 
 	test('repeated destroy() calls return the same Promise', async () => {
@@ -240,11 +240,11 @@ describe('Client — close() / destroy() with a held ReservedConn', () => {
 		// Graceful close begins draining but must not complete while the
 		// ReservedConn owns the connection.
 		const closePromise = client.close();
-		assert.equal(client.state, 'draining', 'close() entered draining');
+		assert.equal(client.state, 'draining', 'close() should enter the draining state');
 		assert.equal(
 			await stillPending(closePromise),
 			true,
-			'close() pending while ReservedConn held',
+			'expected close() to stay pending while a ReservedConn is held',
 		);
 
 		// Release the holder — drain now completes and close() resolves.
@@ -264,12 +264,12 @@ describe('Client — close() / destroy() with a held ReservedConn', () => {
 		// Force-close resolves WITHOUT waiting for release.
 		await client.destroy();
 		assert.equal(client.state, 'destroyed');
-		assert.equal(conn!.close.mock.callCount(), 1, 'held connection was force-closed');
+		assert.equal(conn!.close.mock.callCount(), 1, 'the held connection should be force-closed');
 
 		// Releasing the (now-defunct) ReservedConn afterwards is a safe
 		// no-op — the pool is destroyed, so release short-circuits.
 		await reserved.release();
-		assert.equal(conn!.close.mock.callCount(), 1, 'no double close on late release');
+		assert.equal(conn!.close.mock.callCount(), 1, 'there should be no double close on a late release');
 	});
 
 	test('sql.acquire() while draining rejects with ClientClosedError', async () => {
@@ -397,11 +397,11 @@ describe('Client — end-to-end smoke', () => {
 		await client.sql`SELECT 1`;
 		await client.sql`SELECT 1`;
 
-		assert.equal(driver.open.mock.callCount(), 1, 'driver.open called only once');
-		assert.equal(conn!.execute.mock.callCount(), 3, '3 executes on same connection');
+		assert.equal(driver.open.mock.callCount(), 1, 'driver.open() should be called only once');
+		assert.equal(conn!.execute.mock.callCount(), 3, 'there should be 3 executes on the same connection');
 		// reset() runs on every release. Each query is one acquire+release;
 		// `client.connect()`'s eager-validate is a fourth (acquire-and-immediately-release).
-		assert.equal(conn!.reset.mock.callCount(), 4, 'reset called per release (connect + 3 queries)');
+		assert.equal(conn!.reset.mock.callCount(), 4, 'reset should be called per release (connect + 3 queries)');
 
 		await client.close();
 	});
@@ -448,6 +448,6 @@ describe('Client — ergonomics', () => {
 		assert.ok(captured);
 		assert.equal(captured.state, 'destroyed');
 		assert.ok(conn);
-		assert.equal(conn.close.mock.callCount(), 1, 'held connection force-closed on dispose');
+		assert.equal(conn.close.mock.callCount(), 1, 'the held connection should be force-closed on dispose');
 	});
 });

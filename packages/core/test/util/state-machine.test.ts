@@ -34,7 +34,7 @@ describe('createStateMachine()', () => {
 		const sm = make('open');
 		assert.ok(sm.can('draining'));
 		assert.ok(sm.can('destroyed'));
-		assert.ok(!sm.can('pending'), 'open → pending is not declared');
+		assert.ok(!sm.can('pending'), 'open → pending should not be a declared transition');
 	});
 
 	test('can() permits a same-state no-op', () => {
@@ -59,7 +59,7 @@ describe('createStateMachine()', () => {
 		const observed: S[] = [];
 		const sm: StateMachine<S> = make('open', () => observed.push(sm.state));
 		sm.to('draining');
-		assert.deepEqual(observed, ['draining'], 'state already changed before the seam ran');
+		assert.deepEqual(observed, ['draining'], 'state should have already changed before the seam ran');
 	});
 
 	test('to() treats a same-state call as a no-op: returns false, no onTransition, no throw', () => {
@@ -74,8 +74,8 @@ describe('createStateMachine()', () => {
 		const onT = mock.fn((_from: S, _to: S) => { /* */ });
 		const sm = make('open', onT);
 		assert.throws(() => sm.to('pending'), /illegal state transition: open → pending/);
-		assert.equal(sm.state, 'open', 'state unchanged after an illegal transition');
-		assert.equal(onT.mock.callCount(), 0, 'no side-effects on an illegal transition');
+		assert.equal(sm.state, 'open', 'state should be unchanged after an illegal transition');
+		assert.equal(onT.mock.callCount(), 0, 'there should be no side-effects on an illegal transition');
 	});
 
 	test('non-linear: a terminal is reachable from several states', () => {

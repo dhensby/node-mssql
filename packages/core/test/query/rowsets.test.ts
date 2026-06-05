@@ -262,7 +262,7 @@ describe('Query.rowsets() — streamed (iterated) form', () => {
 			break;
 		}
 		assert.equal(outerCount, 1);
-		assert.equal(log.releases, 1, 'outer-break triggers runner finally');
+		assert.equal(log.releases, 1, 'outer-break should trigger the runner finally');
 	});
 
 	test('outer-break before consuming inner cancels cleanly', async () => {
@@ -331,7 +331,7 @@ describe('Query.rowsets() — streamed (iterated) form', () => {
 		}
 		assert.deepEqual(collected, [{ n: 1 }, { n: 2 }]);
 		const meta = q.meta();
-		assert.equal(meta.info.length, 1, 'info accumulated to trailer');
+		assert.equal(meta.info.length, 1, 'info should be accumulated to the trailer');
 		assert.equal(meta.info[0]!.message, 'mid-rowset notice');
 	});
 });

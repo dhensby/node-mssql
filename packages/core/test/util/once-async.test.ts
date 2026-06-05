@@ -43,6 +43,6 @@ describe('onceAsync()', () => {
 		const once = onceAsync(op);
 		await assert.rejects(() => once(), (err) => err === boom);
 		await assert.rejects(() => once(), (err) => err === boom);
-		assert.equal(op.mock.callCount(), 1, 'op not re-run after a cached rejection');
+		assert.equal(op.mock.callCount(), 1, 'the op should not be re-run after a cached rejection');
 	});
 });

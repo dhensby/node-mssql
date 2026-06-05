@@ -69,7 +69,7 @@ describe('sql.acquire() — builder shape', () => {
 	test('builder is lazy — calling sql.acquire() does NOT pre-acquire', () => {
 		const { sql, pool } = makePool();
 		sql.acquire();  // Build only; do not await.
-		assert.equal(pool.acquire.mock.callCount(), 0, 'no acquire until builder is awaited');
+		assert.equal(pool.acquire.mock.callCount(), 0, 'there should be no acquire until the builder is awaited');
 	});
 
 	test('.signal(s) is chainable; the signal threads through to pool.acquire()', async () => {
@@ -313,8 +313,8 @@ describe('ReservedConn — .transaction()', () => {
 		const tx = await conn.transaction();
 		try {
 			await tx`SELECT 1`;
-			assert.equal(backend.beginTransaction.mock.callCount(), 1, 'BEGIN fired on the held connection');
-			assert.equal(pool.acquire.mock.callCount(), 1, 'no second acquire — reused the held connection');
+			assert.equal(backend.beginTransaction.mock.callCount(), 1, 'BEGIN should fire on the held connection');
+			assert.equal(pool.acquire.mock.callCount(), 1, 'there should be no second acquire (reused the held connection)');
 		} finally {
 			await tx.commit();
 		}
@@ -326,7 +326,7 @@ describe('ReservedConn — .transaction()', () => {
 		const tx = await conn.transaction();
 		await tx.commit();
 		assert.equal(backend.commit.mock.callCount(), 1);
-		assert.equal(release.mock.callCount(), 0, 'commit did not return the connection to the pool');
+		assert.equal(release.mock.callCount(), 0, 'commit should not return the connection to the pool');
 		// The ReservedConn is still usable after the transaction commits.
 		await conn`SELECT after-commit`;
 		assert.equal(backend.execute.mock.calls.at(-1)!.arguments[0].sql, 'SELECT after-commit');

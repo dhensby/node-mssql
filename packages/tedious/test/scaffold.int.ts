@@ -15,6 +15,6 @@ describe('integration scaffold', () => {
 		assert.equal(typeof config.user, 'string');
 		assert.equal(typeof config.password, 'string');
 		assert.equal(typeof config.database, 'string');
-		assert.ok(config.password.length > 0, 'password is non-empty');
+		assert.ok(config.password.length > 0, 'the password should be non-empty');
 	});
 });

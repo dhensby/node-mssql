@@ -49,8 +49,8 @@ describe('mapQueryError — server statement rejections', () => {
 		assert.equal(err.serverName, 'srv');
 		assert.equal(err.lineNumber, 1);
 		assert.equal(err.connectionId, 'conn_1');
-		assert.equal(err.cause, native, 'native error preserved on cause');
-		assert.equal(err.message, native.message, 'server message text verbatim');
+		assert.equal(err.cause, native, 'the native error should be preserved on cause');
+		assert.equal(err.message, native.message, 'the server message text should be preserved verbatim');
 	});
 
 	test('duplicate-key unique index (2601) → kind "unique", index name parsed', () => {
@@ -134,7 +134,7 @@ describe('mapConnectError — connect/reset failures', () => {
 		const native = new TediousConnectionError("Login failed for user 'sa'.", 'ELOGIN');
 		const err = mapConnectError(native, { connectionId: 'conn_2' });
 		assert.ok(err instanceof CredentialError);
-		assert.ok(err instanceof ConnectionError, 'CredentialError is-a ConnectionError');
+		assert.ok(err instanceof ConnectionError, 'CredentialError should be a ConnectionError');
 		assert.equal(err.connectionId, 'conn_2');
 		assert.equal(err.cause, native);
 	});

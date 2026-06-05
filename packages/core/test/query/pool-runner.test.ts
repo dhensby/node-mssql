@@ -21,7 +21,7 @@ describe('poolRunner — acquire / execute / release', () => {
 		}
 
 		assert.equal(pool.acquire.mock.callCount(), 1);
-		assert.equal(release.mock.callCount(), 1, 'release fired on natural drain');
+		assert.equal(release.mock.callCount(), 1, 'release should fire on natural drain');
 		assert.equal(conn.execute.mock.callCount(), 1);
 		assert.deepEqual(events, [{ kind: 'done' }]);
 	});
@@ -78,8 +78,8 @@ describe('poolRunner — acquire / execute / release', () => {
 			}
 		}
 
-		assert.equal(seen, 1, 'broke after first row');
-		assert.equal(release.mock.callCount(), 1, 'release fired despite early break');
+		assert.equal(seen, 1, 'the loop should break after the first row');
+		assert.equal(release.mock.callCount(), 1, 'release should fire despite the early break');
 	});
 
 	test('releases the connection when execute() throws mid-stream', async () => {
@@ -98,6 +98,6 @@ describe('poolRunner — acquire / execute / release', () => {
 			/connection lost/,
 		);
 
-		assert.equal(release.mock.callCount(), 1, 'release fired despite execute throw');
+		assert.equal(release.mock.callCount(), 1, 'release should fire despite the execute throw');
 	});
 });

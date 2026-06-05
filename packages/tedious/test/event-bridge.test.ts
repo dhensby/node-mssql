@@ -184,7 +184,7 @@ describe('EventBridge — termination', () => {
 				seen.push(ev);
 			}
 		}, /mid-stream failure/);
-		assert.equal(seen.length, 2, 'buffered events drained before throw');
+		assert.equal(seen.length, 2, 'buffered events should be drained before the throw');
 	});
 
 	test('fail() (request completion-callback error) → events.on iterator throws', async () => {
@@ -244,7 +244,7 @@ describe('EventBridge — backpressure', () => {
 			request.fireRow([i]);
 		}
 
-		assert.ok(request.paused >= 1, 'pause was called once watermark hit');
+		assert.ok(request.paused >= 1, 'pause should be called once the watermark was hit');
 
 		// Drain the 11 buffered events (1 metadata + 10 rows) one at a time
 		// while the source is still live. Pulling exactly the buffered count
@@ -256,7 +256,7 @@ describe('EventBridge — backpressure', () => {
 			const { value } = await iter.next();
 			if (value !== undefined) seen.push(value[0]);
 		}
-		assert.ok(request.resumed >= 1, 'resume was called as the consumer drained');
+		assert.ok(request.resumed >= 1, 'resume should be called as the consumer drained');
 
 		// Now end the stream and let the iterator close on `'end'`.
 		request.fireDone(10);
@@ -358,7 +358,7 @@ describe('EventBridge — destroy', () => {
 		await bridge.destroy();
 		// Already-completed path: cancel is NOT called because the request
 		// has already settled. Listener cleanup still runs.
-		assert.equal(request.cancelled, 0, 'cancel skipped on already-completed path');
+		assert.equal(request.cancelled, 0, 'cancel should be skipped on the already-completed path');
 		assert.equal(request.listenersRemoved, 1);
 	});
 
@@ -366,7 +366,7 @@ describe('EventBridge — destroy', () => {
 		const { bridge } = buildBridge();
 		const a = bridge.destroy();
 		const b = bridge.destroy();
-		assert.equal(a, b, 'second destroy() returned the stored promise');
+		assert.equal(a, b, 'the second destroy() should return the stored promise');
 		await a;
 	});
 });

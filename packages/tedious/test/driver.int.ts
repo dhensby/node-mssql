@@ -75,14 +75,14 @@ describe('tediousDriver — connection lifecycle (integration)', () => {
 		await assert.rejects(
 			() => client.connect(),
 			(err: unknown) => {
-				assert.ok(err instanceof CredentialError, 'login failure → CredentialError');
-				assert.ok(err instanceof ConnectionError, 'CredentialError is-a ConnectionError');
-				assert.ok(err.cause instanceof Error, 'native tedious error preserved on cause');
-				assert.equal(typeof err.connectionId, 'string', 'connect failure carries connectionId');
+				assert.ok(err instanceof CredentialError, 'a login failure should map to CredentialError');
+				assert.ok(err instanceof ConnectionError, 'CredentialError should be a ConnectionError');
+				assert.ok(err.cause instanceof Error, 'the native tedious error should be preserved on cause');
+				assert.equal(typeof err.connectionId, 'string', 'a connect failure should carry a connectionId');
 				return true;
 			},
 		);
-		assert.equal(client.state, 'destroyed', 'failed connect transitions to destroyed');
+		assert.equal(client.state, 'destroyed', 'a failed connect should leave the client destroyed');
 	});
 });
 
@@ -279,7 +279,7 @@ describe('tediousDriver — round-out terminals (integration)', () => {
 			assert.equal(meta.completed, true);
 			assert.ok(
 				meta.rowsAffectedPerStatement.length >= 1,
-				'per-statement counts populated',
+				'expected per-statement counts to be populated',
 			);
 		} finally {
 			await client.close();
@@ -478,7 +478,7 @@ describe('tediousDriver — sql.acquire (integration)', () => {
 			const a = await conn<{ spid: number }>`SELECT @@SPID AS spid`;
 			const b = await conn<{ spid: number }>`SELECT @@SPID AS spid`;
 			assert.ok(a[0] !== undefined && b[0] !== undefined);
-			assert.equal(a[0]!.spid, b[0]!.spid, 'two queries shared one session');
+			assert.equal(a[0]!.spid, b[0]!.spid, 'the two queries should share one session');
 		} finally {
 			await client.close();
 		}
@@ -603,9 +603,9 @@ describe('tediousDriver — sql.acquire (integration)', () => {
 			assert.equal(
 				client.state,
 				'draining',
-				'close() is parked in draining while the ReservedConn is held',
+				'close() should be parked in draining while the ReservedConn is held',
 			);
-			assert.equal(order.length, 0, 'close() has not resolved yet');
+			assert.equal(order.length, 0, 'close() should not have resolved yet');
 
 			order.push('release');
 			await conn.release();
@@ -615,7 +615,7 @@ describe('tediousDriver — sql.acquire (integration)', () => {
 			assert.deepEqual(
 				order,
 				['release', 'close-resolved'],
-				'release precedes close resolution — close() waited for the holder',
+				'expected release to precede close resolution (close() waited for the holder)',
 			);
 			assert.equal(client.state, 'destroyed');
 		} finally {
@@ -664,7 +664,7 @@ describe('tediousDriver — sql.transaction (integration)', () => {
 				const rows = await client.sql.unsafe<{ id: number }>(
 					`SELECT id FROM ${tableName}`,
 				);
-				assert.deepEqual(rows, [{ id: 1 }], 'commit persisted the insert');
+				assert.deepEqual(rows, [{ id: 1 }], 'commit should persist the insert');
 			} finally {
 				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
 			}
@@ -701,7 +701,7 @@ describe('tediousDriver — sql.transaction (integration)', () => {
 				const rows = await client.sql.unsafe<{ id: number }>(
 					`SELECT id FROM ${tableName}`,
 				);
-				assert.deepEqual(rows, [], 'rollback discarded the insert');
+				assert.deepEqual(rows, [], 'rollback should discard the insert');
 			} finally {
 				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
 			}
@@ -727,7 +727,7 @@ describe('tediousDriver — sql.transaction (integration)', () => {
 				const rows = await client.sql.unsafe<{ id: number }>(
 					`SELECT id FROM ${tableName}`,
 				);
-				assert.deepEqual(rows, [], 'dispose-without-commit rolled back');
+				assert.deepEqual(rows, [], 'dispose-without-commit should roll back');
 			} finally {
 				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
 			}
@@ -749,7 +749,7 @@ describe('tediousDriver — sql.transaction (integration)', () => {
 				const row = rows.find(
 					(r) => r['Set Option'].toLowerCase() === 'isolation level',
 				);
-				assert.ok(row !== undefined, 'isolation level reported');
+				assert.ok(row !== undefined, 'the isolation level should be reported');
 				assert.equal(row!.Value.toLowerCase(), 'serializable');
 			} finally {
 				await tx.rollback();
@@ -868,7 +868,7 @@ describe('tediousDriver — savepoints (integration)', () => {
 					throw err;
 				}
 				const rows = await client.sql.unsafe<{ id: number }>(`SELECT id FROM ${tableName}`);
-				assert.deepEqual(rows, [{ id: 7 }], 'disposal kept the work');
+				assert.deepEqual(rows, [{ id: 7 }], 'disposal should keep the work');
 			} finally {
 				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
 			}
@@ -948,17 +948,17 @@ describe('tediousDriver — savepoints (integration)', () => {
 					// Two SAVE TRANSACTIONs requested at once: in v12 the second
 					// would EREQINPROG; here they serialise into two ordered marks.
 					const [sp1, sp2] = await Promise.all([tx.savepoint(), tx.savepoint()]);
-					assert.notEqual(sp1.name, sp2.name, 'distinct marks');
+					assert.notEqual(sp1.name, sp2.name, 'marks should be distinct');
 					await tx.unsafe(`INSERT INTO ${tableName} (id) VALUES (2)`).run();
 					await sp1.rollback();   // ROLLBACK TO the earlier mark → discards id 2 and sp2
-					assert.equal(sp2.state, 'rolled-back', 'later mark invalidated by the earlier rollback');
+					assert.equal(sp2.state, 'rolled-back', 'the later mark should be invalidated by the earlier rollback');
 					await tx.commit();
 				} catch (err) {
 					await tx.rollback();
 					throw err;
 				}
 				const rows = await client.sql.unsafe<{ id: number }>(`SELECT id FROM ${tableName}`);
-				assert.deepEqual(rows, [{ id: 1 }], 'only pre-savepoint work persisted');
+				assert.deepEqual(rows, [{ id: 1 }], 'only pre-savepoint work should persist');
 			} finally {
 				await client.sql.unsafe(`DROP TABLE ${tableName}`).run();
 			}
@@ -1060,7 +1060,7 @@ describe('tediousDriver — .rowsets() multi-rowset (integration)', () => {
 				saw++;
 				break;
 			}
-			assert.equal(saw, 1, 'broke after first rowset');
+			assert.equal(saw, 1, 'the loop should break after the first rowset');
 			// The cancel released the connection — follow-up succeeds.
 			const rows = await client.sql<{ ok: number }>`SELECT 1 AS ok`;
 			assert.deepEqual(rows, [{ ok: 1 }]);
@@ -1238,10 +1238,10 @@ describe('tediousDriver — error taxonomy (integration)', () => {
 				await assert.rejects(
 					() => client.sql.unsafe(`INSERT INTO ${t} (id) VALUES (1)`).run(),
 					(err: unknown) => {
-						assert.ok(err instanceof ConstraintError, 'duplicate key → ConstraintError');
+						assert.ok(err instanceof ConstraintError, 'a duplicate key should map to ConstraintError');
 						assert.equal(err.kind, 'unique');
 						assert.equal(err.number, 2627);
-						assert.ok(err.cause instanceof Error, 'native RequestError on cause');
+						assert.ok(err.cause instanceof Error, 'the native RequestError should be preserved on cause');
 						return true;
 					},
 				);
@@ -1268,7 +1268,7 @@ describe('tediousDriver — error taxonomy (integration)', () => {
 				await assert.rejects(
 					() => client.sql.unsafe(`INSERT INTO ${child} (id, parent_id) VALUES (1, 999)`).run(),
 					(err: unknown) => {
-						assert.ok(err instanceof ConstraintError, 'FK violation → ConstraintError');
+						assert.ok(err instanceof ConstraintError, 'an FK violation should map to ConstraintError');
 						assert.equal(err.kind, 'foreignKey');
 						assert.equal(err.number, 547);
 						return true;
@@ -1290,9 +1290,9 @@ describe('tediousDriver — error taxonomy (integration)', () => {
 			await assert.rejects(
 				() => client.sql.unsafe('SELECT * FROM dbo.this_table_does_not_exist_xyz').run(),
 				(err: unknown) => {
-					assert.ok(err instanceof QueryError, 'server rejection → QueryError');
-					assert.ok(!(err instanceof ConstraintError), 'not a ConstraintError');
-					assert.equal(err.number, 208, 'invalid object name is T-SQL 208');
+					assert.ok(err instanceof QueryError, 'a server rejection should map to QueryError');
+					assert.ok(!(err instanceof ConstraintError), 'it should not be a ConstraintError');
+					assert.equal(err.number, 208, 'an invalid object name should be T-SQL error 208');
 					return true;
 				},
 			);

@@ -52,10 +52,10 @@ describe('object id generator', () => {
 		const first = nextId('pool', custom);
 		const second = nextId('pool', custom);
 		assert.equal(calls.length, 2);
-		assert.equal(calls[0]?.[0], 'pool');
-		assert.equal(calls[1]?.[0], 'pool');
-		const firstN = calls[0]?.[1] ?? 0;
-		const secondN = calls[1]?.[1] ?? 0;
+		assert.equal(calls[0]![0], 'pool');
+		assert.equal(calls[1]![0], 'pool');
+		const firstN = calls[0]![1] ?? 0;
+		const secondN = calls[1]![1] ?? 0;
 		assert.equal(secondN, firstN + 1);
 		assert.equal(first, `pool-${firstN}`);
 		assert.equal(second, `pool-${secondN}`);

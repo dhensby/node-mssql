@@ -27,6 +27,6 @@ describe('Driver port', () => {
 			events.push(ev);
 		}
 		assert.equal(events.length, 1);
-		assert.equal(events[0]?.kind, 'done');
+		assert.equal(events[0]!.kind, 'done');
 	});
 });

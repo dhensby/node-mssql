@@ -101,7 +101,7 @@ describe('PooledConnection', () => {
 			captured = pooled;
 			assert.equal(pooled.released, false);
 		}
-		assert.equal(captured?.released, true);
+		assert.equal(captured!.released, true);
 	});
 
 	test('destroy() marks connection broken without releasing', async () => {

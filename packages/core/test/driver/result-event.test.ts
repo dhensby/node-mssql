@@ -45,7 +45,7 @@ describe('ResultEvent', () => {
 					assert.deepEqual(e.values, [1, 'a']);
 					break;
 				case 'metadata':
-					assert.equal(e.columns[0]?.name, 'id');
+					assert.equal(e.columns[0]!.name, 'id');
 					break;
 				case 'envChange':
 					assert.equal(e.type, 'database');

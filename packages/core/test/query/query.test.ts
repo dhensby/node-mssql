@@ -37,7 +37,7 @@ describe('Query — construction & lazy execution', () => {
 		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const req: ExecuteRequest = { sql: 'SELECT @p', params: [{ name: 'p', value: 1 }] };
 		await new Query({ runner, request: req }).all();
-		assert.equal(runner.run.mock.calls[0]?.arguments[0], req);
+		assert.equal(runner.run.mock.calls[0]!.arguments[0], req);
 	});
 
 	test('runner receives a signal that propagates the consumer-supplied AbortSignal', async () => {
@@ -48,7 +48,7 @@ describe('Query — construction & lazy execution', () => {
 		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const ac = new AbortController();
 		await new Query({ runner, request: stmt('SELECT 1'), signal: ac.signal }).all();
-		const runnerSignal = runner.run.mock.calls[0]?.arguments[1];
+		const runnerSignal = runner.run.mock.calls[0]!.arguments[1];
 		assert.ok(runnerSignal !== undefined, 'runner received a signal');
 		assert.equal(runnerSignal.aborted, false);
 		ac.abort();
@@ -140,9 +140,9 @@ describe('Query.all() — single rowset', () => {
 			request: stmt('SELECT d, b, n FROM t'),
 		}).all();
 		assert.equal(rows.length, 1);
-		assert.equal(rows[0]?.d, date, 'Date passed through');
-		assert.equal(rows[0]?.b, buf, 'Uint8Array passed through');
-		assert.equal(rows[0]?.n, null);
+		assert.equal(rows[0]!.d, date, 'Date passed through');
+		assert.equal(rows[0]!.b, buf, 'Uint8Array passed through');
+		assert.equal(rows[0]!.n, null);
 	});
 });
 
@@ -697,13 +697,13 @@ describe('Query — trailer event accumulation', () => {
 		const meta = q.meta();
 		assert.equal(meta.info.length, 1);
 		const got: InfoMessage | undefined = meta.info[0];
-		assert.equal(got?.number, 5701);
-		assert.equal(got?.state, 1);
-		assert.equal(got?.class, 0);
-		assert.equal(got?.message, 'Changed database context to MyDB');
-		assert.equal(got?.serverName, 'srv');
-		assert.equal(got?.procName, 'sp_x');
-		assert.equal(got?.lineNumber, 12);
+		assert.equal(got!.number, 5701);
+		assert.equal(got!.state, 1);
+		assert.equal(got!.class, 0);
+		assert.equal(got!.message, 'Changed database context to MyDB');
+		assert.equal(got!.serverName, 'srv');
+		assert.equal(got!.procName, 'sp_x');
+		assert.equal(got!.lineNumber, 12);
 	});
 
 	test('print messages accumulate in meta.print', async () => {
@@ -729,9 +729,9 @@ describe('Query — trailer event accumulation', () => {
 		await q.run();
 		const envChanges: readonly EnvChange[] = q.meta().envChanges;
 		assert.equal(envChanges.length, 2);
-		assert.equal(envChanges[0]?.type, 'database');
-		assert.equal(envChanges[0]?.oldValue, 'master');
-		assert.equal(envChanges[1]?.type, 'language');
+		assert.equal(envChanges[0]!.type, 'database');
+		assert.equal(envChanges[0]!.oldValue, 'master');
+		assert.equal(envChanges[1]!.type, 'language');
 	});
 
 	test('output parameters accumulate in meta.output keyed by name', async () => {

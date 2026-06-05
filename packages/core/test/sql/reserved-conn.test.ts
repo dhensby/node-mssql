@@ -77,7 +77,7 @@ describe('sql.acquire() — builder shape', () => {
 		const ac = new AbortController();
 		const conn = await sql.acquire().signal(ac.signal);
 		assert.equal(pool.acquire.mock.callCount(), 1);
-		assert.equal(pool.acquire.mock.calls[0]?.arguments[0], ac.signal);
+		assert.equal(pool.acquire.mock.calls[0]!.arguments[0], ac.signal);
 		await conn.release();
 	});
 
@@ -163,8 +163,8 @@ describe('ReservedConn — pinned behaviour', () => {
 		const conn = await sql.acquire();
 		try {
 			await conn.unsafe('SELECT * FROM t WHERE id = @id', { id: 7 });
-			assert.equal(backend.execute.mock.calls[0]?.arguments[0].sql, 'SELECT * FROM t WHERE id = @id');
-			assert.deepEqual(backend.execute.mock.calls[0]?.arguments[0].params, [{ name: 'id', value: 7 }]);
+			assert.equal(backend.execute.mock.calls[0]!.arguments[0].sql, 'SELECT * FROM t WHERE id = @id');
+			assert.deepEqual(backend.execute.mock.calls[0]!.arguments[0].params, [{ name: 'id', value: 7 }]);
 		} finally {
 			await conn.release();
 		}
@@ -286,8 +286,8 @@ describe('PoolBoundSqlTag — surface', () => {
 		await sql`SELECT 1`;
 		await sql.unsafe('SELECT 2');
 		assert.equal(backend.execute.mock.callCount(), 2);
-		assert.equal(backend.execute.mock.calls[0]?.arguments[0].sql, 'SELECT 1');
-		assert.equal(backend.execute.mock.calls[1]?.arguments[0].sql, 'SELECT 2');
+		assert.equal(backend.execute.mock.calls[0]!.arguments[0].sql, 'SELECT 1');
+		assert.equal(backend.execute.mock.calls[1]!.arguments[0].sql, 'SELECT 2');
 	});
 
 	test('a ReservedConn does NOT carry .acquire (no nested acquire)', async () => {
@@ -329,7 +329,7 @@ describe('ReservedConn — .transaction()', () => {
 		assert.equal(release.mock.callCount(), 0, 'commit did not return the connection to the pool');
 		// The ReservedConn is still usable after the transaction commits.
 		await conn`SELECT after-commit`;
-		assert.equal(backend.execute.mock.calls.at(-1)?.arguments[0].sql, 'SELECT after-commit');
+		assert.equal(backend.execute.mock.calls.at(-1)!.arguments[0].sql, 'SELECT after-commit');
 		// Releasing the ReservedConn is what returns it to the pool.
 		await conn.release();
 		assert.equal(release.mock.callCount(), 1);

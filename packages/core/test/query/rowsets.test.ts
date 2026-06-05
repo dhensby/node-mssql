@@ -332,7 +332,7 @@ describe('Query.rowsets() — streamed (iterated) form', () => {
 		assert.deepEqual(collected, [{ n: 1 }, { n: 2 }]);
 		const meta = q.meta();
 		assert.equal(meta.info.length, 1, 'info accumulated to trailer');
-		assert.equal(meta.info[0]?.message, 'mid-rowset notice');
+		assert.equal(meta.info[0]!.message, 'mid-rowset notice');
 	});
 });
 

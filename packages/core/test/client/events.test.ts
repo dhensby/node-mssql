@@ -78,8 +78,8 @@ describe('Client — close event', () => {
 		client.on('close', (p) => captured.push(p));
 		await client.close();
 		assert.equal(captured.length, 1);
-		assert.equal(captured[0]?.reason, 'drain');
-		assert.equal(captured[0]?.error, undefined);
+		assert.equal(captured[0]!.reason, 'drain');
+		assert.equal(captured[0]!.error, undefined);
 	});
 
 	test('fires with reason "drain" on close() of a never-connected client', async () => {
@@ -89,7 +89,7 @@ describe('Client — close event', () => {
 		await client.close();
 		// `pending → destroyed` is still a `'drain'` from close()'s POV.
 		assert.equal(captured.length, 1);
-		assert.equal(captured[0]?.reason, 'drain');
+		assert.equal(captured[0]!.reason, 'drain');
 	});
 
 	test('fires with reason "destroy" on destroy()', async () => {
@@ -99,8 +99,8 @@ describe('Client — close event', () => {
 		client.on('close', (p) => captured.push(p));
 		await client.destroy();
 		assert.equal(captured.length, 1);
-		assert.equal(captured[0]?.reason, 'destroy');
-		assert.equal(captured[0]?.error, undefined);
+		assert.equal(captured[0]!.reason, 'destroy');
+		assert.equal(captured[0]!.error, undefined);
 	});
 
 	test('fires with reason "connect-failure" and the originating error on connect() rejection', async () => {
@@ -110,8 +110,8 @@ describe('Client — close event', () => {
 		client.on('close', (p) => captured.push(p));
 		await assert.rejects(() => client.connect(), /auth denied/);
 		assert.equal(captured.length, 1);
-		assert.equal(captured[0]?.reason, 'connect-failure');
-		assert.equal(captured[0]?.error, boom);
+		assert.equal(captured[0]!.reason, 'connect-failure');
+		assert.equal(captured[0]!.error, boom);
 	});
 
 	test('fires AT MOST once per Client lifetime', async () => {

@@ -89,7 +89,7 @@ describe('SingleConnectionPool — acquire and release', () => {
 		});
 		const pooled = await pool.acquire();
 		assert.equal(driver.open.mock.callCount(), 1);
-		assert.equal(driver.open.mock.calls[0]?.arguments[0], fakeDriverOptions);
+		assert.equal(driver.open.mock.calls[0]!.arguments[0], fakeDriverOptions);
 		await pooled.release();
 	});
 
@@ -606,7 +606,7 @@ describe('SingleConnectionPool — hooks', () => {
 		const b = await pool.acquire();
 		assert.equal(b.connection.id, 'conn_2', 'served fresh connection');
 		assert.equal(driver.open.mock.callCount(), 2, 'driver.open() called for replacement');
-		assert.equal(conns[0]?.close.mock.callCount(), 1, 'stale connection closed');
+		assert.equal(conns[0]!.close.mock.callCount(), 1, 'stale connection closed');
 
 		await b.release();
 	});
@@ -658,7 +658,7 @@ describe('SingleConnectionPool — hooks', () => {
 		await a.release();
 
 		// release didn't throw to caller — pool absorbed it and destroyed conn.
-		assert.equal(conns[0]?.close.mock.callCount(), 1);
+		assert.equal(conns[0]!.close.mock.callCount(), 1);
 
 		const b = await pool.acquire();
 		assert.equal(b.connection.id, 'conn_2', 'fresh connection on next acquire');
@@ -783,8 +783,8 @@ describe('SingleConnectionPool — PooledConnection.destroy()', () => {
 
 		const a = await pool.acquire();
 		await a.destroy();
-		assert.equal(conns[0]?.close.mock.callCount(), 1);
-		assert.equal(conns[0]?.reset.mock.callCount(), 0, 'reset not run on destroy path');
+		assert.equal(conns[0]!.close.mock.callCount(), 1);
+		assert.equal(conns[0]!.reset.mock.callCount(), 0, 'reset not run on destroy path');
 
 		// Next acquire creates fresh.
 		const b = await pool.acquire();

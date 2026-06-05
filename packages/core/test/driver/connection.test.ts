@@ -24,10 +24,10 @@ describe('ConnectionEvents', () => {
 		});
 
 		assert.equal(received.length, 4);
-		assert.equal(received[0]?.reason, 'user');
-		assert.equal(received[1]?.reason, 'reset');
-		assert.equal(received[2]?.reason, 'remote');
-		assert.equal(received[3]?.reason, 'error');
-		assert.ok(received[3]?.error instanceof ConnectionError);
+		assert.equal(received[0]!.reason, 'user');
+		assert.equal(received[1]!.reason, 'reset');
+		assert.equal(received[2]!.reason, 'remote');
+		assert.equal(received[3]!.reason, 'error');
+		assert.ok(received[3]!.error instanceof ConnectionError);
 	});
 });

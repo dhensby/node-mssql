@@ -79,7 +79,7 @@ describe('sql.transaction() — builder shape', () => {
 		const { sql, conn } = makePool();
 		const tx = await sql.transaction();
 		try {
-			assert.equal(conn.beginTransaction.mock.calls[0]?.arguments[0]?.isolationLevel, 'read committed');
+			assert.equal(conn.beginTransaction.mock.calls[0]!.arguments[0]!.isolationLevel, 'read committed');
 		} finally {
 			await tx.rollback();
 		}
@@ -89,7 +89,7 @@ describe('sql.transaction() — builder shape', () => {
 		const { sql, conn } = makePool('serializable');
 		const tx = await sql.transaction();
 		try {
-			assert.equal(conn.beginTransaction.mock.calls[0]?.arguments[0]?.isolationLevel, 'serializable');
+			assert.equal(conn.beginTransaction.mock.calls[0]!.arguments[0]!.isolationLevel, 'serializable');
 		} finally {
 			await tx.rollback();
 		}
@@ -99,7 +99,7 @@ describe('sql.transaction() — builder shape', () => {
 		const { sql, conn } = makePool('serializable');
 		const tx = await sql.transaction().isolationLevel('snapshot');
 		try {
-			assert.equal(conn.beginTransaction.mock.calls[0]?.arguments[0]?.isolationLevel, 'snapshot');
+			assert.equal(conn.beginTransaction.mock.calls[0]!.arguments[0]!.isolationLevel, 'snapshot');
 		} finally {
 			await tx.rollback();
 		}
@@ -170,8 +170,8 @@ describe('Transaction — query execution', () => {
 		const tx = await sql.transaction();
 		try {
 			await tx.unsafe('SELECT * FROM t WHERE id = @id', { id: 7 });
-			assert.equal(conn.execute.mock.calls[0]?.arguments[0].sql, 'SELECT * FROM t WHERE id = @id');
-			assert.deepEqual(conn.execute.mock.calls[0]?.arguments[0].params, [{ name: 'id', value: 7 }]);
+			assert.equal(conn.execute.mock.calls[0]!.arguments[0].sql, 'SELECT * FROM t WHERE id = @id');
+			assert.deepEqual(conn.execute.mock.calls[0]!.arguments[0].params, [{ name: 'id', value: 7 }]);
 		} finally {
 			await tx.rollback();
 		}
@@ -269,7 +269,7 @@ describe('Transaction — savepoints', () => {
 			const sp = await tx.savepoint();
 			assert.equal(conn.savepoint.mock.callCount(), 1);
 			assert.match(conn.savepoint.mock.calls[0]!.arguments[0], /^sp_[0-9a-f]{10}_\d+$/);
-			assert.equal(sp.name, conn.savepoint.mock.calls[0]?.arguments[0]);
+			assert.equal(sp.name, conn.savepoint.mock.calls[0]!.arguments[0]);
 			assert.equal(sp.state, 'active');
 			assert.equal(typeof sp.rollback, 'function');
 			assert.equal(typeof sp.release, 'function');

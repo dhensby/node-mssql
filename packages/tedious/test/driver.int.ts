@@ -478,7 +478,7 @@ describe('tediousDriver — sql.acquire (integration)', () => {
 			const a = await conn<{ spid: number }>`SELECT @@SPID AS spid`;
 			const b = await conn<{ spid: number }>`SELECT @@SPID AS spid`;
 			assert.ok(a[0] !== undefined && b[0] !== undefined);
-			assert.equal(a[0]?.spid, b[0]?.spid, 'two queries shared one session');
+			assert.equal(a[0]!.spid, b[0]!.spid, 'two queries shared one session');
 		} finally {
 			await client.close();
 		}
@@ -750,7 +750,7 @@ describe('tediousDriver — sql.transaction (integration)', () => {
 					(r) => r['Set Option'].toLowerCase() === 'isolation level',
 				);
 				assert.ok(row !== undefined, 'isolation level reported');
-				assert.equal(row?.Value.toLowerCase(), 'serializable');
+				assert.equal(row!.Value.toLowerCase(), 'serializable');
 			} finally {
 				await tx.rollback();
 			}

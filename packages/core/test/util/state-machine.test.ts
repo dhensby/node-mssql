@@ -52,7 +52,7 @@ describe('createStateMachine()', () => {
 		const sm = make('open', onT);
 		sm.to('draining');
 		assert.equal(onT.mock.callCount(), 1);
-		assert.deepEqual(onT.mock.calls[0]?.arguments, ['open', 'draining']);
+		assert.deepEqual(onT.mock.calls[0]!.arguments, ['open', 'draining']);
 	});
 
 	test('onTransition observes the already-mutated state (state changes first)', () => {

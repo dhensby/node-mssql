@@ -36,8 +36,8 @@ describe('poolRunner — acquire / execute / release', () => {
 			// drain
 		}
 
-		assert.equal(pool.acquire.mock.calls[0]?.arguments[0], ac.signal);
-		assert.equal(conn.execute.mock.calls[0]?.arguments[1], ac.signal);
+		assert.equal(pool.acquire.mock.calls[0]!.arguments[0], ac.signal);
+		assert.equal(conn.execute.mock.calls[0]!.arguments[1], ac.signal);
 	});
 
 	test('forwards the request payload to connection.execute verbatim', async () => {
@@ -53,7 +53,7 @@ describe('poolRunner — acquire / execute / release', () => {
 			// drain
 		}
 
-		assert.equal(conn.execute.mock.calls[0]?.arguments[0], req);
+		assert.equal(conn.execute.mock.calls[0]!.arguments[0], req);
 	});
 
 	test('releases the connection when the consumer breaks early (iter.return)', async () => {

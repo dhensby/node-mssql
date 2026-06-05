@@ -54,16 +54,16 @@ describe('makeSqlTag — SQL assembly', () => {
 		const sql = makeSqlTag(runner);
 		await sql`SELECT 1`;
 		assert.equal(captured.length, 1);
-		assert.equal(captured[0]?.sql, 'SELECT 1');
-		assert.deepEqual(captured[0]?.params, []);
+		assert.equal(captured[0]!.sql, 'SELECT 1');
+		assert.deepEqual(captured[0]!.params, []);
 	});
 
 	test('single interpolation emits @p0 placeholder + ParamBinding', async () => {
 		const { runner, captured } = makeCaptureRunner();
 		const sql = makeSqlTag(runner);
 		await sql`SELECT ${42}`;
-		assert.equal(captured[0]?.sql, 'SELECT @p0');
-		assert.deepEqual(captured[0]?.params, [{ name: 'p0', value: 42 }]);
+		assert.equal(captured[0]!.sql, 'SELECT @p0');
+		assert.deepEqual(captured[0]!.params, [{ name: 'p0', value: 42 }]);
 	});
 
 	test('multiple interpolations emit sequential @p0, @p1, ... placeholders', async () => {
@@ -71,10 +71,10 @@ describe('makeSqlTag — SQL assembly', () => {
 		const sql = makeSqlTag(runner);
 		await sql`SELECT * FROM t WHERE a = ${1} AND b = ${'two'} AND c = ${null}`;
 		assert.equal(
-			captured[0]?.sql,
+			captured[0]!.sql,
 			'SELECT * FROM t WHERE a = @p0 AND b = @p1 AND c = @p2',
 		);
-		assert.deepEqual(captured[0]?.params, [
+		assert.deepEqual(captured[0]!.params, [
 			{ name: 'p0', value: 1 },
 			{ name: 'p1', value: 'two' },
 			{ name: 'p2', value: null },
@@ -86,7 +86,7 @@ describe('makeSqlTag — SQL assembly', () => {
 		const sql = makeSqlTag(runner);
 		await sql`UPDATE t SET x = ${1} WHERE id = ${2} RETURNING *`;
 		assert.equal(
-			captured[0]?.sql,
+			captured[0]!.sql,
 			'UPDATE t SET x = @p0 WHERE id = @p1 RETURNING *',
 		);
 	});
@@ -95,7 +95,7 @@ describe('makeSqlTag — SQL assembly', () => {
 		const { runner, captured } = makeCaptureRunner();
 		const sql = makeSqlTag(runner);
 		await sql`${1}+${2}`;
-		assert.equal(captured[0]?.sql, '@p0+@p1');
+		assert.equal(captured[0]!.sql, '@p0+@p1');
 	});
 
 	test('parameter values pass through verbatim (no kernel-side coercion)', async () => {
@@ -104,7 +104,7 @@ describe('makeSqlTag — SQL assembly', () => {
 		const date = new Date('2026-05-06T00:00:00Z');
 		const buf = new Uint8Array([1, 2, 3]);
 		await sql`SELECT ${date}, ${buf}, ${undefined}, ${true}`;
-		assert.deepEqual(captured[0]?.params, [
+		assert.deepEqual(captured[0]!.params, [
 			{ name: 'p0', value: date },
 			{ name: 'p1', value: buf },
 			{ name: 'p2', value: undefined },
@@ -155,8 +155,8 @@ describe('sql.unsafe — raw text', () => {
 		const { runner, captured } = makeCaptureRunner();
 		const sql = makeSqlTag(runner);
 		await sql.unsafe('SELECT 1 AS n');
-		assert.equal(captured[0]?.sql, 'SELECT 1 AS n');
-		assert.deepEqual(captured[0]?.params, []);
+		assert.equal(captured[0]!.sql, 'SELECT 1 AS n');
+		assert.deepEqual(captured[0]!.params, []);
 	});
 
 	test('object params bind by name', async () => {
@@ -166,8 +166,8 @@ describe('sql.unsafe — raw text', () => {
 			id: 1,
 			name: 'alice',
 		});
-		assert.equal(captured[0]?.sql, 'SELECT * FROM t WHERE a = @id AND b = @name');
-		assert.deepEqual(captured[0]?.params, [
+		assert.equal(captured[0]!.sql, 'SELECT * FROM t WHERE a = @id AND b = @name');
+		assert.deepEqual(captured[0]!.params, [
 			{ name: 'id', value: 1 },
 			{ name: 'name', value: 'alice' },
 		]);
@@ -179,8 +179,8 @@ describe('sql.unsafe — raw text', () => {
 		const { runner, captured } = makeCaptureRunner();
 		const sql = makeSqlTag(runner);
 		await sql.unsafe('SELECT * FROM t WHERE a = @p0 AND b = @p1', [1, 'alice']);
-		assert.equal(captured[0]?.sql, 'SELECT * FROM t WHERE a = @p0 AND b = @p1');
-		assert.deepEqual(captured[0]?.params, [
+		assert.equal(captured[0]!.sql, 'SELECT * FROM t WHERE a = @p0 AND b = @p1');
+		assert.deepEqual(captured[0]!.params, [
 			{ name: 'p0', value: 1 },
 			{ name: 'p1', value: 'alice' },
 		]);
@@ -191,7 +191,7 @@ describe('sql.unsafe — raw text', () => {
 		const sql = makeSqlTag(runner);
 		const date = new Date('2026-05-06T00:00:00Z');
 		await sql.unsafe('SELECT * FROM t WHERE created_at = @d', { d: date });
-		assert.deepEqual(captured[0]?.params, [{ name: 'd', value: date }]);
+		assert.deepEqual(captured[0]!.params, [{ name: 'd', value: date }]);
 	});
 
 	test('lazy execution — runner not invoked until a terminal fires', () => {
@@ -214,13 +214,13 @@ describe('sql.unsafe — raw text', () => {
 		const { runner, captured } = makeCaptureRunner();
 		const sql = makeSqlTag(runner);
 		await sql.unsafe('SELECT 1', []);
-		assert.deepEqual(captured[0]?.params, []);
+		assert.deepEqual(captured[0]!.params, []);
 	});
 
 	test('empty object params is valid (no params bound)', async () => {
 		const { runner, captured } = makeCaptureRunner();
 		const sql = makeSqlTag(runner);
 		await sql.unsafe('SELECT 1', {});
-		assert.deepEqual(captured[0]?.params, []);
+		assert.deepEqual(captured[0]!.params, []);
 	});
 });

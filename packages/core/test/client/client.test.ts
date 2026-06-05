@@ -55,7 +55,7 @@ describe('Client.connect()', () => {
 		const driver = fakeDriver();
 		const client = createClient({ driver, ...baseConfig });
 		await client.connect();
-		const opts = driver.open.mock.calls[0]?.arguments[0];
+		const opts = driver.open.mock.calls[0]!.arguments[0];
 		assert.deepEqual(opts?.credential, baseConfig.credential);
 		assert.deepEqual(opts?.transport, baseConfig.transport);
 	});
@@ -192,7 +192,7 @@ describe('Client.destroy()', () => {
 		await client.connect();
 		await client.destroy();
 		assert.equal(client.state, 'destroyed');
-		assert.equal(conn?.close.mock.callCount(), 1, 'underlying connection closed');
+		assert.equal(conn!.close.mock.callCount(), 1, 'underlying connection closed');
 	});
 
 	test('repeated destroy() calls return the same Promise', async () => {
@@ -264,12 +264,12 @@ describe('Client — close() / destroy() with a held ReservedConn', () => {
 		// Force-close resolves WITHOUT waiting for release.
 		await client.destroy();
 		assert.equal(client.state, 'destroyed');
-		assert.equal(conn?.close.mock.callCount(), 1, 'held connection was force-closed');
+		assert.equal(conn!.close.mock.callCount(), 1, 'held connection was force-closed');
 
 		// Releasing the (now-defunct) ReservedConn afterwards is a safe
 		// no-op — the pool is destroyed, so release short-circuits.
 		await reserved.release();
-		assert.equal(conn?.close.mock.callCount(), 1, 'no double close on late release');
+		assert.equal(conn!.close.mock.callCount(), 1, 'no double close on late release');
 	});
 
 	test('sql.acquire() while draining rejects with ClientClosedError', async () => {
@@ -360,7 +360,7 @@ describe('Client — end-to-end smoke', () => {
 					captured = req;
 					return [
 						{ kind: 'metadata', columns: [{ name: 'x' }] },
-						{ kind: 'row', values: [req.params?.[0]?.value] },
+						{ kind: 'row', values: [req.params?.[0]!.value] },
 						{ kind: 'rowsetEnd', rowsAffected: 1 },
 						{ kind: 'done' },
 					];
@@ -398,10 +398,10 @@ describe('Client — end-to-end smoke', () => {
 		await client.sql`SELECT 1`;
 
 		assert.equal(driver.open.mock.callCount(), 1, 'driver.open called only once');
-		assert.equal(conn?.execute.mock.callCount(), 3, '3 executes on same connection');
+		assert.equal(conn!.execute.mock.callCount(), 3, '3 executes on same connection');
 		// reset() runs on every release. Each query is one acquire+release;
 		// `client.connect()`'s eager-validate is a fourth (acquire-and-immediately-release).
-		assert.equal(conn?.reset.mock.callCount(), 4, 'reset called per release (connect + 3 queries)');
+		assert.equal(conn!.reset.mock.callCount(), 4, 'reset called per release (connect + 3 queries)');
 
 		await client.close();
 	});

@@ -28,9 +28,9 @@
 import type { Connection, ExecuteRequest, IsolationLevel, ResultEvent } from '../driver/index.js';
 import { StateError } from '../errors/index.js';
 import type { PooledConnection } from '../pool/index.js';
-import type { Query, RequestRunner } from '../query/index.js';
+import type { RequestRunner } from '../query/index.js';
 import { withResolvers } from '../util/index.js';
-import { makeSqlTag, type SqlTag, type UnsafeParams } from './tag.js';
+import { makeSqlTag, type SqlTag } from './tag.js';
 import {
 	DEFAULT_ISOLATION_LEVEL,
 	makeReservedTransactionBuilder,
@@ -128,33 +128,22 @@ export function makeReservedConn(
 ): ReservedConn {
 	let released = false;
 	const pinned = pinnedConnection(pooled.connection);
-	const baseTag = makeSqlTag(pinned.runner);
-
-	function callable<T = unknown>(
-		strings: TemplateStringsArray,
-		...values: unknown[]
-	): Query<T> {
+	// One guard for the whole scope: the tag's callable + `.unsafe` (baked in
+	// by makeSqlTag) and `.transaction()` all reject once released.
+	const guard = (): void => {
 		if (released) throw new StateError(RELEASED);
-		return baseTag<T>(strings, ...values);
-	}
-
-	const conn = callable as ReservedConn;
-	conn.unsafe = function unsafe<T = unknown>(
-		text: string,
-		params?: UnsafeParams,
-	): Query<T> {
-		if (released) throw new StateError(RELEASED);
-		return baseTag.unsafe<T>(text, params);
 	};
+
+	const conn = makeSqlTag(pinned.runner, guard) as ReservedConn;
 	conn.transaction = function transaction(): SqlTransactionBuilder {
-		if (released) throw new StateError(RELEASED);
-		// Share the reserved connection AND its FIFO queue (tag + exclusive)
-		// so transaction queries and control ops serialise with bare
-		// reserved-connection queries on the one queue; the transaction's
-		// settle does not release the connection (the ReservedConn owns it).
+		guard();
+		// Share the reserved connection's FIFO queue (runner + exclusive) so
+		// transaction queries and control ops serialise with bare reserved-
+		// connection queries on the one queue; the transaction's settle does
+		// not release the connection (the ReservedConn owns it).
 		return makeReservedTransactionBuilder(
 			pooled.connection,
-			baseTag,
+			pinned.runner,
 			pinned.exclusive,
 			defaultIsolationLevel,
 		);

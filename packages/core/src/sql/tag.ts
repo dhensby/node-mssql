@@ -63,12 +63,20 @@ export interface SqlTag {
  * Each tag invocation produces a fresh {@link Query} — no caching across
  * calls (each call is a distinct round-trip per ADR-0006 single-
  * consumption semantics).
+ *
+ * `guard`, when given, runs before each tag / `.unsafe()` call and may
+ * throw to reject use in the current scope state. This is how the scope
+ * wrappers reject queries after a `ReservedConn` is released or on a
+ * settled `Transaction` — without each re-implementing the callable +
+ * `.unsafe` pair around the same check. The pool-bound tag passes no
+ * guard; its state gate lives in the runner.
  */
-export function makeSqlTag(runner: RequestRunner): SqlTag {
+export function makeSqlTag(runner: RequestRunner, guard?: () => void): SqlTag {
 	function sql<T>(
 		strings: TemplateStringsArray,
 		...values: unknown[]
 	): Query<T> {
+		guard?.();
 		const parts: string[] = [];
 		const params: ParamBinding[] = [];
 		for (let i = 0; i < strings.length; i++) {
@@ -86,6 +94,7 @@ export function makeSqlTag(runner: RequestRunner): SqlTag {
 	}
 
 	function unsafe<T>(text: string, params?: UnsafeParams): Query<T> {
+		guard?.();
 		const bindings: ParamBinding[] = [];
 		if (params !== undefined) {
 			if (Array.isArray(params)) {

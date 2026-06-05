@@ -224,3 +224,37 @@ describe('sql.unsafe — raw text', () => {
 		assert.deepEqual(captured[0]!.params, []);
 	});
 });
+
+// ─── guard — scope-state gate (ADR-0006) ────────────────────────────────────
+//
+// The optional `guard` runs before each tag / `.unsafe()` call and may throw
+// to reject use in the current scope state — how ReservedConn and Transaction
+// reject queries after release / on a settled transaction without each
+// re-implementing the callable + `.unsafe` pair around the same check. The
+// pool-bound tag passes no guard (its state gate lives in the runner).
+
+describe('makeSqlTag — guard', () => {
+	test('runs the guard on both the tag and unsafe paths', () => {
+		const { runner } = makeCaptureRunner();
+		let calls = 0;
+		const sql = makeSqlTag(runner, () => { calls++; });
+		const _q = sql`SELECT 1`;
+		sql.unsafe('SELECT 2');
+		assert.equal(calls, 2, 'guard should run on the tag call and the unsafe call');
+	});
+
+	test('a throwing guard rejects the tag call before the runner is reached', () => {
+		const { runner, captured } = makeCaptureRunner();
+		const closed = new Error('scope closed');
+		const sql = makeSqlTag(runner, () => { throw closed; });
+		assert.throws(() => sql`SELECT 1`, (err: unknown) => err === closed);
+		assert.equal(captured.length, 0, 'a guard-rejected tag call should not reach the runner');
+	});
+
+	test('a throwing guard rejects the unsafe call', () => {
+		const { runner } = makeCaptureRunner();
+		const closed = new Error('scope closed');
+		const sql = makeSqlTag(runner, () => { throw closed; });
+		assert.throws(() => sql.unsafe('SELECT 1'), (err: unknown) => err === closed);
+	});
+});

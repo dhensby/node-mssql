@@ -44,10 +44,10 @@ import type { Connection, IsolationLevel } from '../driver/index.js';
 import { StateError } from '../errors/index.js';
 import { savepointName } from '../ids/index.js';
 import type { PooledConnection } from '../pool/index.js';
-import type { Query } from '../query/index.js';
+import type { RequestRunner } from '../query/index.js';
 import { createStateMachine } from '../util/index.js';
 import { pinnedConnection } from './reserved-conn.js';
-import { makeSqlTag, type SqlTag, type UnsafeParams } from './tag.js';
+import { makeSqlTag, type SqlTag } from './tag.js';
 
 const TX_NOT_OPEN = (state: TransactionState): string =>
 	`Transaction is ${state}. Calling a tag or lifecycle method on a settled transaction is not allowed.`;
@@ -152,7 +152,7 @@ const swallow = (): void => { /* release / settle errors during teardown are unr
  */
 export function makeTransaction(
 	connection: Connection,
-	baseTag: SqlTag,
+	runner: RequestRunner,
 	exclusive: Exclusive,
 	release: () => Promise<void>,
 ): Transaction {
@@ -207,23 +207,8 @@ export function makeTransaction(
 		return -1;
 	};
 
-	function callable<T = unknown>(
-		strings: TemplateStringsArray,
-		...values: unknown[]
-	): Query<T> {
-		assertOpen();
-		return baseTag<T>(strings, ...values);
-	}
-
-	const tx = callable as Transaction;
-
-	tx.unsafe = function unsafe<T = unknown>(
-		text: string,
-		params?: UnsafeParams,
-	): Query<T> {
-		assertOpen();
-		return baseTag.unsafe<T>(text, params);
-	};
+	// Callable + `.unsafe`, both gated by assertOpen() inside makeSqlTag.
+	const tx = makeSqlTag(runner, assertOpen) as Transaction;
 
 	tx.savepoint = async function savepoint(): Promise<Savepoint> {
 		assertOpen();
@@ -342,14 +327,14 @@ export function makeTransaction(
 // reserved connection) so nothing leaks.
 async function beginTransaction(
 	connection: Connection,
-	baseTag: SqlTag,
+	runner: RequestRunner,
 	exclusive: Exclusive,
 	release: () => Promise<void>,
 	level: IsolationLevel,
 ): Promise<Transaction> {
 	try {
 		await exclusive(() => connection.beginTransaction({ isolationLevel: level }));
-		return makeTransaction(connection, baseTag, exclusive, release);
+		return makeTransaction(connection, runner, exclusive, release);
 	} catch (err) {
 		await release().catch(swallow);
 		throw err;
@@ -358,7 +343,7 @@ async function beginTransaction(
 
 interface TxConnection {
 	readonly connection: Connection
-	readonly baseTag: SqlTag
+	readonly runner: RequestRunner
 	readonly exclusive: Exclusive
 	release(): Promise<void>
 }
@@ -377,8 +362,8 @@ function makeBuilder(
 	const start = (): Promise<Transaction> => {
 		if (started !== undefined) return started;
 		started = (async () => {
-			const { connection, baseTag, exclusive, release } = await source(abortSignal);
-			return beginTransaction(connection, baseTag, exclusive, release, perCallLevel ?? defaultLevel);
+			const { connection, runner, exclusive, release } = await source(abortSignal);
+			return beginTransaction(connection, runner, exclusive, release, perCallLevel ?? defaultLevel);
 		})();
 		return started;
 	};
@@ -418,7 +403,7 @@ export function makeTransactionBuilder(
 		const pinned = pinnedConnection(pooled.connection);
 		return {
 			connection: pooled.connection,
-			baseTag: makeSqlTag(pinned.runner),
+			runner: pinned.runner,
 			exclusive: pinned.exclusive,
 			release: () => pooled.release(),
 		};
@@ -428,7 +413,7 @@ export function makeTransactionBuilder(
 /**
  * Build a {@link SqlTransactionBuilder} over an already-held reserved
  * connection (`sql.acquire()`'s `ReservedConn`). Shares the reserved
- * connection AND its FIFO queue — `baseTag` for queries, `exclusive` for
+ * connection AND its FIFO queue — `runner` for queries, `exclusive` for
  * control ops — so transaction work and bare reserved-connection queries
  * all serialise on one queue. Its `release` is a **no-op**: the
  * `ReservedConn` owns the connection's pool lifecycle, so committing or
@@ -436,13 +421,13 @@ export function makeTransactionBuilder(
  */
 export function makeReservedTransactionBuilder(
 	connection: Connection,
-	baseTag: SqlTag,
+	runner: RequestRunner,
 	exclusive: Exclusive,
 	defaultLevel: IsolationLevel,
 ): SqlTransactionBuilder {
 	return makeBuilder(async () => ({
 		connection,
-		baseTag,
+		runner,
 		exclusive,
 		release: async () => { /* no-op — the ReservedConn owns the connection */ },
 	}), defaultLevel);

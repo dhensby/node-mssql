@@ -3,6 +3,7 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import stylistic from '@stylistic/eslint-plugin';
+import n from 'eslint-plugin-n';
 
 export default tseslint.config(
 	{
@@ -50,6 +51,32 @@ export default tseslint.config(
 			// Allow empty methods — test fakes implement the driver-port `Connection`
 			// surface with intentional no-op stubs for methods they don't exercise.
 			'@typescript-eslint/no-empty-function': ['error', { allow: ['methods', 'asyncMethods'] }],
+		},
+	},
+	{
+		// Node engines-floor enforcement — SRC ONLY. The shipped code must run on
+		// the lowest supported Node (`engines.node`, currently >=20.3.0), so a
+		// runtime built-in newer than the floor is a bug for consumers. Tests run
+		// on the dev / CI Node and aren't bound by the floor, so they're excluded.
+		// `eslint-plugin-n` reads each package's `engines.node` and flags runtime
+		// built-ins (global + `node:*`) introduced after it.
+		//
+		// MODERNIZE convention — when you reach for a runtime API newer than the
+		// floor, either raise `engines.node`, or polyfill it behind a small module
+		// and tag that polyfill with
+		//   // MODERNIZE(node>=N): <drop this once the floor reaches N>
+		// so a floor bump is a grep away from finding everything to delete (see
+		// src/util/with-resolvers.ts). The grep target is the literal `MODERNIZE`.
+		files: ['packages/**/src/**/*.ts'],
+		plugins: { n },
+		rules: {
+			'n/no-unsupported-features/node-builtins': 'error',
+			// `Symbol.asyncDispose` / `Symbol.dispose` (Node 20.4) sit one minor
+			// above the floor, but TypeScript downlevels `using` / `await using`
+			// with a runtime shim that defines them when absent — so they're safe
+			// at 20.3. plugin-n doesn't track them today; if a release ever does,
+			// add them to an `ignores: [...]` here (the shim keeps consumers safe).
+			'n/no-unsupported-features/es-builtins': 'error',
 		},
 	},
 );

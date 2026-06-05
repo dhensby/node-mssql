@@ -61,6 +61,7 @@ updates:
           - "standard"
           - "eslint"
           - "@eslint/*"
+          - "eslint-plugin-*"
 
   # ─── GitHub Actions (master) ──────────────────────────────────────────────
   - package-ecosystem: github-actions

@@ -5,6 +5,9 @@
 // (globalThis.crypto) works across Node, Deno, Bun, and edge runtimes
 // without a node:crypto shim — see ADR-0003 / ADR-0016.
 const tagBuffer = new Uint8Array(5);
+// MODERNIZE(node>=23): drop the eslint-disable below — Node 23 removes the
+// "experimental" status from the global `crypto`, so plugin-n stops flagging it.
+// eslint-disable-next-line n/no-unsupported-features/node-builtins -- WebCrypto is present from Node 19; the rule objects only to the pre-23 "experimental" label (cross-runtime rationale above)
 globalThis.crypto.getRandomValues(tagBuffer);
 export const PROCESS_TAG: string = Array.from(tagBuffer, (b) =>
 	b.toString(16).padStart(2, '0'),

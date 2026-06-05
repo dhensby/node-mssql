@@ -41,6 +41,7 @@
  */
 
 import type { Connection, IsolationLevel } from '../driver/index.js';
+import { StateError } from '../errors/index.js';
 import { savepointName } from '../ids/index.js';
 import type { PooledConnection } from '../pool/index.js';
 import type { Query } from '../query/index.js';
@@ -181,8 +182,8 @@ export function makeTransaction(
 	// commit/rollback starting and `state` flipping once its wire op lands —
 	// so a query can't slip onto the connection after a COMMIT was issued.
 	const assertOpen = (): void => {
-		if (!sm.is('open')) throw new TypeError(TX_NOT_OPEN(sm.state));
-		if (settle !== null) throw new TypeError(TX_SETTLING);
+		if (!sm.is('open')) throw new StateError(TX_NOT_OPEN(sm.state));
+		if (settle !== null) throw new StateError(TX_SETTLING);
 	};
 
 	// Pop the stack down to (and including) index `i`, spending every popped
@@ -244,7 +245,7 @@ export function makeTransaction(
 			name,
 			get state(): SavepointState { return spState; },
 			async rollback(): Promise<void> {
-				if (spState !== 'active') throw new TypeError(SP_SPENT(spState));
+				if (spState !== 'active') throw new StateError(SP_SPENT(spState));
 				await exclusive(async () => {
 					if (spState !== 'active') return; // spent while queued
 					assertOpen();
@@ -253,7 +254,7 @@ export function makeTransaction(
 				});
 			},
 			async release(): Promise<void> {
-				if (spState !== 'active') throw new TypeError(SP_SPENT(spState));
+				if (spState !== 'active') throw new StateError(SP_SPENT(spState));
 				assertOpen();
 				// Application-layer only (no wire op) and synchronous, so it
 				// can't interleave with an in-flight rollback's stack pop.
@@ -276,7 +277,7 @@ export function makeTransaction(
 		await exclusive(async () => {
 			assertOpen();
 			const i = indexOf(name);
-			if (i < 0) throw new TypeError(NO_SAVEPOINT('roll back to', name));
+			if (i < 0) throw new StateError(NO_SAVEPOINT('roll back to', name));
 			await connection.rollbackToSavepoint(stack[i]!.name); // ROLLBACK TRANSACTION <name>
 			popTo(i, 'rolled-back');
 		});
@@ -285,7 +286,7 @@ export function makeTransaction(
 	tx.releaseSavepoint = async function releaseSavepoint(name?: string): Promise<void> {
 		assertOpen();
 		const i = indexOf(name);
-		if (i < 0) throw new TypeError(NO_SAVEPOINT('release', name));
+		if (i < 0) throw new StateError(NO_SAVEPOINT('release', name));
 		popTo(i, 'released'); // application-layer only — no wire op
 	};
 
@@ -384,12 +385,12 @@ function makeBuilder(
 
 	const builder: SqlTransactionBuilder = {
 		signal(s) {
-			if (started !== undefined) throw new TypeError(SIGNAL_AFTER_START);
+			if (started !== undefined) throw new StateError(SIGNAL_AFTER_START);
 			abortSignal = s;
 			return builder;
 		},
 		isolationLevel(level) {
-			if (started !== undefined) throw new TypeError(ISOLATION_AFTER_START);
+			if (started !== undefined) throw new StateError(ISOLATION_AFTER_START);
 			perCallLevel = level;
 			return builder;
 		},

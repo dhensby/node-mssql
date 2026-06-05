@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import {
 	type ResultEvent,
 	makePoolBoundSqlTag,
+	StateError,
 } from '../../src/index.js';
 import { fakeConnection, fakePool } from '../support/fakes.js';
 
@@ -100,12 +101,12 @@ describe('sql.acquire() — builder shape', () => {
 		assert.equal(pool.acquire.mock.callCount(), 1);
 	});
 
-	test('.signal() after the builder has been awaited throws TypeError', async () => {
+	test('.signal() after the builder has been awaited throws StateError', async () => {
 		const { sql } = makePool();
 		const builder = sql.acquire();
 		const conn = await builder;
 		try {
-			assert.throws(() => builder.signal(new AbortController().signal), TypeError);
+			assert.throws(() => builder.signal(new AbortController().signal), StateError);
 		} finally {
 			await conn.release();
 		}
@@ -150,12 +151,12 @@ describe('ReservedConn — pinned behaviour', () => {
 		assert.equal(release.mock.callCount(), 1);
 	});
 
-	test('queries after release() throw TypeError', async () => {
+	test('queries after release() throw StateError', async () => {
 		const { sql } = makePool();
 		const conn = await sql.acquire();
 		await conn.release();
-		assert.throws(() => conn`SELECT 1`, TypeError);
-		assert.throws(() => conn.unsafe('SELECT 1'), TypeError);
+		assert.throws(() => conn`SELECT 1`, StateError);
+		assert.throws(() => conn.unsafe('SELECT 1'), StateError);
 	});
 
 	test('.unsafe() works on a ReservedConn', async () => {
@@ -353,6 +354,6 @@ describe('ReservedConn — .transaction()', () => {
 		const tx = await conn.transaction();
 		await tx.commit();
 		await conn.release();
-		assert.throws(() => conn`SELECT 1`, TypeError);
+		assert.throws(() => conn`SELECT 1`, StateError);
 	});
 });

@@ -21,11 +21,12 @@
  * poison the queue — the next one proceeds on the same connection.
  *
  * Lifecycle — `release()` returns the connection to the pool, after
- * which any further query throws `TypeError`. `release()` is
+ * which any further query throws `StateError`. `release()` is
  * idempotent. `Symbol.asyncDispose` calls `release()`.
  */
 
 import type { Connection, ExecuteRequest, IsolationLevel, ResultEvent } from '../driver/index.js';
+import { StateError } from '../errors/index.js';
 import type { PooledConnection } from '../pool/index.js';
 import type { Query, RequestRunner } from '../query/index.js';
 import { withResolvers } from '../util/index.js';
@@ -105,7 +106,7 @@ export function makeAcquireBuilder(
 	const builder: SqlAcquireBuilder = {
 		signal(s) {
 			if (started !== undefined) {
-				throw new TypeError(SIGNAL_AFTER_START);
+				throw new StateError(SIGNAL_AFTER_START);
 			}
 			abortSignal = s;
 			return builder;
@@ -133,7 +134,7 @@ export function makeReservedConn(
 		strings: TemplateStringsArray,
 		...values: unknown[]
 	): Query<T> {
-		if (released) throw new TypeError(RELEASED);
+		if (released) throw new StateError(RELEASED);
 		return baseTag<T>(strings, ...values);
 	}
 
@@ -142,11 +143,11 @@ export function makeReservedConn(
 		text: string,
 		params?: UnsafeParams,
 	): Query<T> {
-		if (released) throw new TypeError(RELEASED);
+		if (released) throw new StateError(RELEASED);
 		return baseTag.unsafe<T>(text, params);
 	};
 	conn.transaction = function transaction(): SqlTransactionBuilder {
-		if (released) throw new TypeError(RELEASED);
+		if (released) throw new StateError(RELEASED);
 		// Share the reserved connection AND its FIFO queue (tag + exclusive)
 		// so transaction queries and control ops serialise with bare
 		// reserved-connection queries on the one queue; the transaction's

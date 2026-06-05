@@ -21,6 +21,7 @@ import {
 	CredentialError,
 	createClient,
 	QueryError,
+	StateError,
 } from '@tediousjs/mssql-core';
 import { tediousDriver } from '../src/index.js';
 import { type IntegrationConfig, requireIntegrationConfig } from './integration.js';
@@ -257,7 +258,7 @@ describe('tediousDriver — round-out terminals (integration)', () => {
 		await client.connect();
 		try {
 			const q = client.sql`SELECT 1 AS n`;
-			assert.throws(() => q.meta(), TypeError);
+			assert.throws(() => q.meta(), StateError);
 			await q;
 			const meta = q.meta();
 			assert.equal(meta.completed, true);
@@ -518,13 +519,13 @@ describe('tediousDriver — sql.acquire (integration)', () => {
 		}
 	});
 
-	test('queries after release() throw TypeError', async () => {
+	test('queries after release() throw StateError', async () => {
 		const client = makeClient(requireIntegrationConfig());
 		await client.connect();
 		try {
 			const conn = await client.sql.acquire();
 			await conn.release();
-			assert.throws(() => conn`SELECT 1`, TypeError);
+			assert.throws(() => conn`SELECT 1`, StateError);
 		} finally {
 			await client.close();
 		}

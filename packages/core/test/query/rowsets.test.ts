@@ -22,6 +22,7 @@ import {
 	Query,
 	type RequestRunner,
 	type ResultEvent,
+	StateError,
 } from '../../src/index.js';
 
 interface RunnerLog {
@@ -486,7 +487,7 @@ describe('Query.rowsets() — single consumption', () => {
 		]);
 		const q = new Query({ runner, request: stmt('SELECT n') });
 		await q.all();
-		assert.throws(() => q.rowsets(), TypeError);
+		assert.throws(() => q.rowsets(), StateError);
 	});
 
 	test('.all() after rowsets() throws (Query consumed)', async () => {
@@ -498,7 +499,7 @@ describe('Query.rowsets() — single consumption', () => {
 		]);
 		const q = new Query({ runner, request: stmt('SELECT n') });
 		await q.rowsets();
-		await assert.rejects(() => q.all(), TypeError);
+		await assert.rejects(() => q.all(), StateError);
 	});
 
 	test('awaiting AND iterating the same Rowsets throws on the second consumption', async () => {
@@ -511,7 +512,7 @@ describe('Query.rowsets() — single consumption', () => {
 		const q = new Query({ runner, request: stmt('SELECT n') });
 		const rs = q.rowsets();
 		await rs;
-		assert.throws(() => rs[Symbol.asyncIterator](), TypeError);
+		assert.throws(() => rs[Symbol.asyncIterator](), StateError);
 	});
 
 	test('iterating then awaiting the same Rowsets throws on the second consumption', async () => {
@@ -524,14 +525,14 @@ describe('Query.rowsets() — single consumption', () => {
 		const q = new Query({ runner, request: stmt('SELECT n') });
 		const rs = q.rowsets();
 		for await (const _x of rs) { /* */ }
-		await assert.rejects(() => Promise.resolve(rs), TypeError);
+		await assert.rejects(() => Promise.resolve(rs), StateError);
 	});
 
 	test('rowsets() on a disposed Query throws', async () => {
 		const { runner } = makeFakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.dispose();
-		assert.throws(() => q.rowsets(), TypeError);
+		assert.throws(() => q.rowsets(), StateError);
 	});
 });
 

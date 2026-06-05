@@ -21,6 +21,7 @@ export {
 	type ClientClosedErrorOptions,
 	ClientNotConnectedError,
 } from './client.js';
+export { StateError } from './state.js';
 export {
 	AbortError,
 	TimeoutError,

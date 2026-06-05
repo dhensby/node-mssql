@@ -32,7 +32,7 @@
  *
  * The two forms are mutually exclusive: each `Rowsets` is single-
  * consumption (await OR iterate, not both). A second call throws
- * `TypeError`. The Query that produced this `Rowsets` is itself
+ * `StateError`. The Query that produced this `Rowsets` is itself
  * already consumed by the moment `q.rowsets()` returned (matching the
  * single-consumption guard on `.all()` / `.iterate()` / `.run()` /
  * `.result()`).
@@ -45,6 +45,7 @@
  */
 
 import type { ColumnMetadata, ResultEvent } from '../driver/index.js';
+import { StateError } from '../errors/index.js';
 
 /**
  * Map a rowset-element tuple to the buffered-await result type:
@@ -140,7 +141,7 @@ export class Rowsets<Tuple extends readonly unknown[] = readonly unknown[]> impl
 
 	#claimConsumption(): void {
 		if (this.#consumed) {
-			throw new TypeError(ALREADY_CONSUMED);
+			throw new StateError(ALREADY_CONSUMED);
 		}
 		this.#consumed = true;
 	}

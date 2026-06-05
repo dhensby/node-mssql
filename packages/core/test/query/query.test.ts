@@ -10,6 +10,7 @@ import {
 	type QueryMeta,
 	type RequestRunner,
 	type ResultEvent,
+	StateError,
 } from '../../src/index.js';
 import { fakeRunner } from '../support/fakes.js';
 
@@ -167,20 +168,20 @@ describe('Query.all() — duplicate column names', () => {
 // ─── Single-consumption guard ───────────────────────────────────────────────
 
 describe('Query — single-consumption', () => {
-	test('a second .all() call throws TypeError', async () => {
+	test('a second .all() call throws StateError', async () => {
 		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.all();
-		await assert.rejects(() => q.all(), TypeError);
+		await assert.rejects(() => q.all(), StateError);
 	});
 
-	test('a second `await` throws TypeError', async () => {
+	test('a second `await` throws StateError', async () => {
 		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q;
 		await assert.rejects(async () => {
 			await q;
-		}, TypeError);
+		}, StateError);
 	});
 
 	test('the guard fires synchronously on entry, before consuming the runner', async () => {
@@ -188,7 +189,7 @@ describe('Query — single-consumption', () => {
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.all();
 		assert.equal(runner.run.mock.callCount(), 1);
-		await assert.rejects(() => q.all(), TypeError);
+		await assert.rejects(() => q.all(), StateError);
 		assert.equal(runner.run.mock.callCount(), 1, 'the second call should not invoke the runner');
 	});
 });
@@ -386,7 +387,7 @@ describe('Query.iterate() — streaming row consumption', () => {
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		// First call exhausts.
 		for await (const _row of q.iterate()) { /* noop */ }
-		assert.throws(() => q.iterate(), TypeError);
+		assert.throws(() => q.iterate(), StateError);
 	});
 
 	test('iterate() and all() share the single-consumption guard', async () => {
@@ -398,7 +399,7 @@ describe('Query.iterate() — streaming row consumption', () => {
 		]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.all();
-		assert.throws(() => q.iterate(), TypeError);
+		assert.throws(() => q.iterate(), StateError);
 	});
 });
 
@@ -449,7 +450,7 @@ describe('Query.run() — drain-only', () => {
 		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('UPDATE t') });
 		await q.run();
-		await assert.rejects(() => q.run(), TypeError);
+		await assert.rejects(() => q.run(), StateError);
 	});
 });
 
@@ -479,7 +480,7 @@ describe('Query.result()', () => {
 		]);
 		const q = new Query({ runner, request: stmt('SELECT id WHERE 0 = 1') });
 		await q.result();
-		await assert.rejects(() => q.all(), TypeError);
+		await assert.rejects(() => q.all(), StateError);
 	});
 
 	test('throws MultipleRowsetsError on multi-rowset (row-promising terminal)', async () => {
@@ -498,10 +499,10 @@ describe('Query.result()', () => {
 // ─── Trailer accumulation + Query.meta() ────────────────────────────────────
 
 describe('Query.meta() — trailer access', () => {
-	test('throws TypeError if called before stream terminates', () => {
+	test('throws StateError if called before stream terminates', () => {
 		const { runner } = fakeRunner([]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
-		assert.throws(() => q.meta(), TypeError);
+		assert.throws(() => q.meta(), StateError);
 	});
 
 	test('returns trailer with completed=true after natural drain', async () => {
@@ -1123,11 +1124,11 @@ describe('Query.columns() — first-rowset shape access', () => {
 		await assert.rejects(() => q.columns(), /protocol failure/);
 	});
 
-	test('rejects with TypeError on a disposed Query', async () => {
+	test('rejects with StateError on a disposed Query', async () => {
 		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.dispose();
-		await assert.rejects(() => q.columns(), TypeError);
+		await assert.rejects(() => q.columns(), StateError);
 	});
 
 	test('dispose() while .columns() is pending rejects the columns promise', async () => {
@@ -1287,9 +1288,9 @@ describe('Query.cancel() / .dispose() — feature behaviour', () => {
 		const { runner } = fakeRunner([{ kind: 'done' }]);
 		const q = new Query({ runner, request: stmt('SELECT 1') });
 		await q.dispose();
-		assert.throws(() => q.iterate(), TypeError);
-		await assert.rejects(() => q.all(), TypeError);
-		await assert.rejects(() => q.run(), TypeError);
+		assert.throws(() => q.iterate(), StateError);
+		await assert.rejects(() => q.all(), StateError);
+		await assert.rejects(() => q.run(), StateError);
 	});
 
 	test('dispose() is idempotent', async () => {
@@ -1307,7 +1308,7 @@ describe('Query.cancel() / .dispose() — feature behaviour', () => {
 			captured = q;
 		}
 		// `q` has been disposed; subsequent terminals throw.
-		assert.throws(() => captured!.iterate(), TypeError);
+		assert.throws(() => captured!.iterate(), StateError);
 	});
 
 	test('cancel() mid-stream propagates AbortError to the row terminal', async () => {

@@ -16,6 +16,7 @@ import {
 	type IsolationLevel,
 	type Savepoint,
 	makePoolBoundSqlTag,
+	StateError,
 } from '../../src/index.js';
 import { fakeConnection, fakePool } from '../support/fakes.js';
 
@@ -140,8 +141,8 @@ describe('sql.transaction() — builder shape', () => {
 		const builder = sql.transaction();
 		const tx = await builder;
 		try {
-			assert.throws(() => builder.signal(new AbortController().signal), TypeError);
-			assert.throws(() => builder.isolationLevel('snapshot'), TypeError);
+			assert.throws(() => builder.signal(new AbortController().signal), StateError);
+			assert.throws(() => builder.isolationLevel('snapshot'), StateError);
 		} finally {
 			await tx.rollback();
 		}
@@ -225,12 +226,12 @@ describe('Transaction — lifecycle', () => {
 		assert.equal(conn.commit.mock.callCount(), 1);
 	});
 
-	test('queries after commit() throw TypeError', async () => {
+	test('queries after commit() throw StateError', async () => {
 		const { sql } = makePool();
 		const tx = await sql.transaction();
 		await tx.commit();
-		assert.throws(() => tx`SELECT 1`, TypeError);
-		assert.throws(() => tx.unsafe('SELECT 1'), TypeError);
+		assert.throws(() => tx`SELECT 1`, StateError);
+		assert.throws(() => tx.unsafe('SELECT 1'), StateError);
 	});
 
 	test('await using disposes (rollback default) on scope exit', async () => {
@@ -354,8 +355,8 @@ describe('Transaction — savepoints', () => {
 		try {
 			const sp = await tx.savepoint();
 			await sp.release();
-			await assert.rejects(async () => { await sp.rollback(); }, TypeError);
-			await assert.rejects(async () => { await sp.release(); }, TypeError);
+			await assert.rejects(async () => { await sp.rollback(); }, StateError);
+			await assert.rejects(async () => { await sp.release(); }, StateError);
 		} finally {
 			await tx.rollback();
 		}
@@ -378,9 +379,9 @@ describe('Transaction — savepoints', () => {
 		const { sql } = makePool();
 		const tx = await sql.transaction();
 		await tx.commit();
-		await assert.rejects(async () => { await tx.savepoint(); }, TypeError);
-		await assert.rejects(async () => { await tx.rollbackSavepoint(); }, TypeError);
-		await assert.rejects(async () => { await tx.releaseSavepoint(); }, TypeError);
+		await assert.rejects(async () => { await tx.savepoint(); }, StateError);
+		await assert.rejects(async () => { await tx.rollbackSavepoint(); }, StateError);
+		await assert.rejects(async () => { await tx.releaseSavepoint(); }, StateError);
 	});
 });
 
@@ -397,7 +398,7 @@ describe('Transaction — savepoint stack', () => {
 			assert.deepEqual(conn.rollbackToSavepoint.mock.calls.map((call) => call.arguments[0]), [sp1.name]);
 			assert.equal(sp1.state, 'rolled-back');
 			assert.equal(sp2.state, 'rolled-back', 'sp2 should be invalidated by the earlier rollback');
-			await assert.rejects(async () => { await sp2.rollback(); }, TypeError);
+			await assert.rejects(async () => { await sp2.rollback(); }, StateError);
 		} finally {
 			await tx.rollback();
 		}
@@ -462,7 +463,7 @@ describe('Transaction — savepoint stack', () => {
 		const { sql } = makePool();
 		const tx = await sql.transaction();
 		try {
-			await assert.rejects(async () => { await tx.rollbackSavepoint(); }, TypeError);
+			await assert.rejects(async () => { await tx.rollbackSavepoint(); }, StateError);
 		} finally {
 			await tx.rollback();
 		}
@@ -473,7 +474,7 @@ describe('Transaction — savepoint stack', () => {
 		const tx = await sql.transaction();
 		try {
 			await tx.savepoint();
-			await assert.rejects(async () => { await tx.rollbackSavepoint('sp_does_not_exist'); }, TypeError);
+			await assert.rejects(async () => { await tx.rollbackSavepoint('sp_does_not_exist'); }, StateError);
 		} finally {
 			await tx.rollback();
 		}
@@ -491,7 +492,7 @@ describe('Transaction — settling with open savepoints', () => {
 		assert.equal(conn.commit.mock.callCount(), 1);
 		assert.equal(conn.rollbackToSavepoint.mock.callCount(), 0, 'there should be no cascade of savepoint rollbacks');
 		assert.equal(sp.state, 'released', 'the savepoint work should be kept by the commit');
-		await assert.rejects(async () => { await sp.rollback(); }, TypeError);
+		await assert.rejects(async () => { await sp.rollback(); }, StateError);
 	});
 
 	test('rollback with open savepoints is one ROLLBACK (no cascade); marks spent', async () => {
@@ -566,7 +567,7 @@ describe('Transaction — concurrency safety', () => {
 		const { sql } = makePool();
 		const tx = await sql.transaction();
 		void tx.commit();  // settling — state still reads "open" until the wire lands
-		assert.throws(() => tx`SELECT 1`, TypeError, 'there should be no new work once a settle is in flight');
+		assert.throws(() => tx`SELECT 1`, StateError, 'there should be no new work once a settle is in flight');
 		await tx.commit();  // drain the in-flight commit
 	});
 

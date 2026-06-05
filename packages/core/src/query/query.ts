@@ -22,7 +22,7 @@
  * - Drain-only terminal (`run`) consumes `#streamEvents()` directly,
  *   ignoring rows and rowset boundaries — drain-only paths are
  *   "deliberately oblivious to rowset boundaries" per ADR-0006.
- * - `.meta()` is a sync getter on the trailer state. Throws `TypeError`
+ * - `.meta()` is a sync getter on the trailer state. Throws `StateError`
  *   if the stream hasn't terminated (mirroring `Response.headers` /
  *   `xhr.getAllResponseHeaders()` / Node streams' `readableEnded`).
  * - Single-consumption is enforced via `#consumed`. The flag flips on
@@ -31,7 +31,7 @@
  */
 
 import type { ColumnMetadata, ExecuteRequest, ResultEvent } from '../driver/index.js';
-import { MultipleRowsetsError } from '../errors/index.js';
+import { MultipleRowsetsError, StateError } from '../errors/index.js';
 import { withResolvers } from '../util/index.js';
 import type { EnvChange, InfoMessage, QueryMeta } from './meta.js';
 import { Rowsets } from './rowsets.js';
@@ -349,11 +349,11 @@ export class Query<T = unknown> implements
 	 *   ends without ever emitting metadata.
 	 * - Stream errors before metadata: rejects with the same error
 	 *   the row terminal would have surfaced.
-	 * - Disposed Query: rejects with `TypeError`.
+	 * - Disposed Query: rejects with `StateError`.
 	 */
 	columns(): Promise<readonly ColumnMetadata[]> {
 		if (this.#disposed) {
-			return Promise.reject(new TypeError(DISPOSED));
+			return Promise.reject(new StateError(DISPOSED));
 		}
 		// Already-resolved fast path.
 		if (this.#firstColumns !== null) {
@@ -390,7 +390,7 @@ export class Query<T = unknown> implements
 	/**
 	 * Synchronous accessor for trailer data — row counts, info / print /
 	 * envChange messages, output parameters, return status. Throws
-	 * `TypeError` if the stream hasn't yet terminated; the natural
+	 * `StateError` if the stream hasn't yet terminated; the natural
 	 * sequence is to await a row-consuming terminal first, then read
 	 * `.meta()`.
 	 *
@@ -400,7 +400,7 @@ export class Query<T = unknown> implements
 	 */
 	meta<O = Record<string, never>>(): QueryMeta<O> {
 		if (!this.#terminated) {
-			throw new TypeError(META_BEFORE_TERMINATION);
+			throw new StateError(META_BEFORE_TERMINATION);
 		}
 		return snapshotMeta<O>(this.#trailer);
 	}
@@ -470,7 +470,7 @@ export class Query<T = unknown> implements
 	/**
 	 * `await using` resource cleanup — cancels any in-flight stream and
 	 * marks the Query as disposed. Subsequent terminal calls throw
-	 * `TypeError`.
+	 * `StateError`.
 	 *
 	 * Idempotent — repeat calls return immediately.
 	 */
@@ -488,10 +488,10 @@ export class Query<T = unknown> implements
 
 	#claimConsumption(): void {
 		if (this.#disposed) {
-			throw new TypeError(DISPOSED);
+			throw new StateError(DISPOSED);
 		}
 		if (this.#consumed) {
-			throw new TypeError(ALREADY_CONSUMED);
+			throw new StateError(ALREADY_CONSUMED);
 		}
 		this.#consumed = true;
 	}

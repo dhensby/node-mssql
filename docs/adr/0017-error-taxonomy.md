@@ -34,6 +34,7 @@ Error
     │   └── PoolClosedError       // acquire against draining/destroyed pool — pool's domain
     ├── ClientNotConnectedError   // query fired before client.connect() resolved — see below
     ├── ClientClosedError         // client-domain wrapper of PoolClosedError — see below
+    ├── StateError                // method called in a state that forbids it — settled tx, disposed Query, released conn
     ├── AbortError                // operation aborted via AbortSignal — name='AbortError'
     ├── TimeoutError              // operation aborted via AbortSignal.timeout() — name='TimeoutError'
     └── DriverError               // unexpected driver-internal failure — wraps as `cause`
@@ -168,6 +169,12 @@ Drain / destroy semantics — what counts as "in-flight" during a graceful drain
 The two-class split respects the domain boundaries: the pool knows about pools (`PoolClosedError` lives in pool-land); the client knows about client lifecycle (`ClientClosedError` lives in client-land). The wrap is cheap — one catch, one re-throw, cause chain preserved. Consumers catch one class (`ClientClosedError`) and get everything.
 
 **`ClientClosedError` is the programmatic answer to [tediousjs/node-mssql#1837](https://github.com/tediousjs/node-mssql/issues/1837).** Where v12 returned tarn's `Error('aborted')` with no stable shape, v13 adapters translate at the port boundary to `PoolClosedError`; the client's dispatcher surfaces it as `ClientClosedError` to consumers.
+
+### `StateError` — operating on an object in a disallowed lifecycle state
+
+Calling a method the target's current state forbids is a programming error, not a recoverable runtime condition: a tag or lifecycle call on a settled transaction, a terminal on a disposed or already-consumed `Query`, a query on a released `ReservedConn`, `.meta()` before the stream has terminated, or configuring a transaction / acquire builder after it has started. These raise `StateError` — a direct `MssqlError` subclass — so they sit in the library taxonomy (`instanceof MssqlError` catches them) and carry the standard correlation ids, rather than escaping as a bare `TypeError`. It is not meant to be caught and retried; the fix is to not make the call in that state.
+
+`TypeError` stays reserved for genuine argument / type errors — an unsupported parameter JS type, an invalid savepoint identifier — which are *not* `MssqlError`s, matching the Node convention that a `TypeError` signals a programmer passing the wrong kind of value rather than a lifecycle misuse.
 
 ### `AbortError` and `TimeoutError` — in-family, with the `name` convention preserved
 

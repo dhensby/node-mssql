@@ -16,7 +16,7 @@ v13 needs:
 - A column-and-row declaration that integrates with the v13 type system ([ADR-0019](0019-sql-type-system.md)).
 - A streaming row source (this is the use case where `AsyncIterable` genuinely earns its place).
 - Bulk-specific options exposed without bloating the general queryable surface.
-- Diagnostics — at minimum, start / end with a `rowsLoaded` count; progress emission for long-running loads is an open question.
+- Diagnostics — start / end with a `rowsLoaded` count — plus first-class progress reporting for long-running loads (an application concern, mirrored to diagnostics for observability).
 
 ## Decision
 
@@ -62,38 +62,55 @@ Unlike TVPs (where the row count is needed up-front for the TDS TVP token, so `A
 
 ```ts
 interface BulkOptions {
-  batchSize?: number              // rows per server-side batch (default: driver-chosen)
+  batchSize?: number              // rows per batch, kernel-implemented — one INSERT BULK statement
+                                  // per batch (default: no batching — one atomic statement)
   keepNulls?: boolean             // KEEP_NULLS — preserve NULLs vs apply column defaults
   keepIdentity?: boolean          // KEEP_IDENTITY — load explicit identity values
   tableLock?: boolean             // TABLOCK — bulk-update lock for duration of load
   checkConstraints?: boolean      // CHECK_CONSTRAINTS — apply constraints (default off for bulk)
   fireTriggers?: boolean          // FIRE_TRIGGERS — fire INSERT triggers (default off for bulk)
+  onProgress?: (progress: BulkProgress) => void  // per confirmed batch — see Progress below
   native?: unknown                // driver-specific escape hatch
 }
 ```
 
-Names match the T-SQL / SqlBulkCopy convention (camelCase'd): a user familiar with the SQL Server bulk-load surface recognises them. Defaults match SQL Server's bulk-load defaults (constraints / triggers off, batch size driver-chosen).
+Names match the T-SQL / SqlBulkCopy convention (camelCase'd): a user familiar with the SQL Server bulk-load surface recognises them. Defaults match SQL Server's bulk-load defaults (constraints / triggers off, no batching).
 
 ### `BulkResult`
 
 ```ts
 interface BulkResult {
-  rowsLoaded: number              // rows the server confirmed loaded
-  // open: per-batch breakdown? error-row info on partial failure?
+  rowsLoaded: number              // rows the server confirmed loaded (sum of batch DONE counts)
 }
 ```
 
-Open question: for partial failures (a batch fails server-side mid-load), whether `BulkResult` should include the partially-loaded count and the failure point, or whether the rejection just throws with a total-rows-attempted-vs-loaded context. Tied to the failure-handling design below.
+A resolved `BulkResult` always means the whole load completed — partial outcomes are never a resolution. Any failure rejects with `BulkError`, which carries the loaded-vs-sent context (see Failure handling).
 
 ### Failure handling
 
-T-SQL bulk-load can fail mid-stream — a constraint violation in batch N rolls back that batch (or the whole load, depending on options). Tentative semantics:
+Bulk load mimics the server's own semantics: **fail fast, statement-atomic**. Neither TDS bulk load nor the drivers offer per-row error reporting or continue-past-error — a TDS ERROR token carries no row ordinal, tedious surfaces exactly one terminal error per load, and one bulk load is one `INSERT BULK` statement that SQL Server aborts and rolls back wholesale on the first error (live-verified: a mid-stream PK violation rolled back the valid rows sent before it; the driver reported `rowCount` 0, never a partial count). This is the ecosystem norm — SqlBulkCopy and JDBC bulk copy are equally fail-fast with no skip-bad-rows mode, and bcp's `MAXERRORS` tolerance is client-side only (rows the *client* fails to convert; server-rejected rows always abort).
 
-- A constraint / type-encoding error during a batch throws `QueryError` with the offending batch / row context attached as soon as the server signals it.
-- In-flight batches before the failure stay committed unless the load was wrapped in a transaction — the transaction-scope decision is the consumer's, not the library's.
-- `AbortSignal` ([ADR-0013](0013-cancellation-and-timeouts.md)) cancels the load mid-stream; partial commits are visible to the database state per the same rule.
+Consequences for the API:
 
-Open question: should `BulkOptions` include a `rollbackOnError` knob that wraps the load in an internal transaction? Probably no — composing with the existing `sql.transaction()` is the clean answer (`await using tx = await sql.transaction(); await tx.bulkLoad(...).load(rows)` — analogous to `tx.acquire()`). Validation needed.
+- **Success is total.** A resolved `BulkResult` means every row loaded; there is no partial-success resolution.
+- **Failure throws `BulkError`** ([ADR-0017](0017-error-taxonomy.md) family) carrying `rowsLoaded` (server-confirmed rows from committed batches), `rowsSent` (rows pulled from the source and put on the wire), `batchIndex` (the failing batch, when batching), and the server error as `cause`. Failing-batch granularity is the honest maximum: the protocol cannot identify the failing *row* — the server error sometimes names the offending value or column ordinal, never the row position, and the ADR commits to documenting that.
+- **At most one error per load.** The server halts at the first failure, so there is no error set to accumulate or stream — no memory concern, and no per-request event surface needed.
+- **Batching bounds the blast radius.** With `batchSize`, one `INSERT BULK` statement runs per batch: committed batches persist (the committed prefix — the same semantics as SqlBulkCopy's `BatchSize` and bcp's `-b`), the failing batch rolls back, the load halts. Unlike SqlBulkCopy — which does not report how much was committed — `BulkError.rowsLoaded` states it.
+- **All-or-nothing is composition, not a flag.** `await using tx = await sql.transaction(); await tx.bulkLoad(...).load(rows)` makes the whole load one transaction regardless of batching. No `rollbackOnError` option — SqlBulkCopy's equivalent (`UseInternalTransaction`) is incompatible with an external transaction, a wart composition avoids.
+- `AbortSignal` ([ADR-0013](0013-cancellation-and-timeouts.md)) cancels the load mid-stream; committed batches persist per the same rules.
+
+### Progress — first-class, not diagnostics
+
+Long-running loads need progress in the application itself, and diagnostics channels are observability — never the app's data path. Progress is therefore first-class: `BulkOptions.onProgress` is invoked once per server-confirmed batch with cumulative counts (precedent: SqlBulkCopy's `NotifyAfter` + `SqlRowsCopied`):
+
+```ts
+interface BulkProgress {
+  rowsLoaded: number              // cumulative server-confirmed rows (committed batches)
+  batchIndex: number              // 0-based index of the batch just confirmed
+}
+```
+
+The callback covers the one signal the caller cannot self-serve: server acknowledgement. Rows *sent* are already observable in the caller's own row source — it is their iterable, countable in a wrapper. Without `batchSize` there are no intermediate acknowledgements, so the callback fires once at completion — meaningful progress cadence is one of the reasons to batch. Cancellation composes via the existing `AbortSignal`, not a return value from the callback (contrast SqlBulkCopy's `SqlRowsCopied.Abort`).
 
 ### Connection lifecycle
 
@@ -105,7 +122,7 @@ Bulk load reinstates the `mssql:bulk` tracingChannel previously dropped from ADR
 
 - **`mssql:bulk` start context:** `{ table, columns, options, database, serverAddress, serverPort?, connectionId, queryId }` — `columns` is the column-name → `SqlKind`-and-parameterisation snapshot (no row data).
 - **`mssql:bulk` `asyncEnd` context (success path):** `{ rowsLoaded }` plus the common `reason: 'completed'` / `reason: 'cancelled'` termination block from ADR-0014.
-- **`mssql:bulk:progress` point channel:** `{ rowsCommitted, batchIndex, queryId }` — fires once per server-confirmed batch. Enables long-running-load progress UIs without polling.
+- **`mssql:bulk:progress` point channel:** `{ rowsLoaded, batchIndex, queryId }` — fires once per server-confirmed batch, mirroring `onProgress` for observability consumers (APM spans, operator dashboards). It is not an application data path — application code uses the first-class `onProgress` option.
 
 The progress channel earns its place (vs being dropped as premature) because bulk load is the case where one operation generates millions of rows of work — operators genuinely need progress visibility, and the channel is the right shape.
 
@@ -118,7 +135,7 @@ interface BulkLoadOptions {
   table: string
   columns: Array<{ name: string, type: SqlType }>
   rows: AsyncIterable<unknown[]>      // positional, in column order
-  options: BulkOptions
+  options: BulkOptions                // wire options; batchSize / onProgress are kernel-implemented
 }
 
 interface BulkResult { rowsLoaded: number }
@@ -132,13 +149,15 @@ The driver translates to wire format:
 - `tedious` uses native `BulkLoad` with column declarations and the row stream.
 - `msnodesqlv8` uses ODBC bulk-insert primitives.
 
-Drivers MUST emit `mssql:bulk:progress` per server-confirmed batch (the kernel cannot synthesise this — only the driver knows when the server acked a batch).
+Batching lives in the kernel: with `batchSize` set, the kernel chunks the row source and issues one `Connection.bulkLoad()` per batch — the port stays one-statement-per-call, matching the drivers' native shape (tedious has no batching primitive; one `bulkLoad` is one `INSERT BULK` statement). Because the kernel sees each batch resolve, it fires `onProgress` and publishes `mssql:bulk:progress` itself; drivers need no progress hook.
 
 ## Consequences
 
 - Bulk load is a first-class queryable-tier feature with a builder shape consistent with `Query` / `Procedure` / `PreparedStatement`.
 - Column declaration sits on top of the v13 type system; row shape is type-inferred at the call site.
 - `AsyncIterable` row sources allow streaming end-to-end without buffering the full row set.
+- Failure semantics mirror the server (live-verified): fail-fast, statement-atomic, committed-prefix under batching. Failures throw `BulkError` with loaded-vs-sent context; a resolution is always a total success.
+- Progress is first-class (`onProgress`) — an application feature — with the diagnostics channel as its observability mirror.
 - `mssql:bulk` and `mssql:bulk:progress` channels return to the diagnostics surface — designed against an actual user-facing API rather than speculatively.
 - The driver port's `bulkLoad()` method gets a settled `BulkLoadOptions` shape that drivers translate.
 
@@ -152,14 +171,13 @@ Drivers MUST emit `mssql:bulk:progress` per server-confirmed batch (the kernel c
 
 **Shared row-source representation across TVP and bulk-load.** Considered (both take `AsyncIterable<Row>` over a typed schema). Kept the surfaces distinct because TVPs bind to a procedure parameter while bulk load targets a table — different verbs at the call site read more clearly than a unified "row-source" abstraction that the user has to disambiguate by context. The underlying `Iterable<Row>` shape is the same, which is the part that matters at the type level.
 
-**Drop `mssql:bulk:progress`; consumers poll `q.meta()` mid-load.** Rejected — `q.meta()` is post-drain only ([ADR-0007](0007-query-result-presentation.md)), so it doesn't serve mid-load progress. A dedicated progress channel is the right shape.
+**Drop `mssql:bulk:progress`; consumers poll `q.meta()` mid-load.** Rejected — `q.meta()` is post-drain only ([ADR-0007](0007-query-result-presentation.md)), so it doesn't serve mid-load progress. First-class `onProgress` for the application, mirrored on the channel for observability, is the right shape.
+
+**Collect row errors and continue loading (report at the end, or emit as they occur).** Rejected — not implementable on the wire. TDS bulk load has no per-row error channel and no continue-past-error: the server aborts the statement at the first failure, so there is at most one terminal error per load and nothing to collect (which also removes any concern about an unbounded error set in memory). The only mainstream server-side tolerance is PostgreSQL 17's `COPY … ON_ERROR ignore`, which covers input-conversion errors only — constraint violations still abort — and TDS has no equivalent. A bounded client-side tolerance à la bcp `MAXERRORS` (skip rows that fail client-side encoding, cap the skips, surface the rejects) is buildable as a future additive option if demand appears, but rows the *server* rejects can never be skipped.
 
 ## Open questions
 
-- Failure handling — does `BulkOptions` get a `rollbackOnError` flag, or do users compose with `sql.transaction()` for atomic bulk loads? Tentative: compose, no flag.
-- `BulkResult` shape on partial failure — does the result include attempted-vs-loaded counts, or does the rejection carry that on the error?
 - `bulkLoad()` on `Transaction` / `ReservedConn` — symmetric with how the queryable surfaces flow into scope handles. Almost certainly yes (just exposing the same builder), but the exact integration needs validation.
-- `mssql:bulk:progress` cadence — per-batch (server ack) or throttled (every N rows or N seconds)? Per-batch is simpler; throttling is a subscriber concern.
 - Identity column handling — `keepIdentity: true` with a column declaration that omits the identity column should presumably error at validation; design that check.
 - `BulkOptions.native` shape — what driver-specific knobs does each driver want surfaced? Subject to validation against tedious / msnodesqlv8 docs.
 

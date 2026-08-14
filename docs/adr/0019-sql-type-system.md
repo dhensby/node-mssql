@@ -1,6 +1,6 @@
 # ADR-0019: SQL type system and type tags
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Date:** 2026-05-03
 - **Deciders:** @dhensby
 

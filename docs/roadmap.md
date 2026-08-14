@@ -25,6 +25,7 @@ This is the living plan for completing the v13 rewrite. It is driven by the [ADR
 | 0014 Diagnostics | 🟡 partial | 1 of ~25 channels published; `tracingChannel` unused |
 | 0015 Connection strings | ❌ not started | no parser, no dependency, no string overload — placeholder type only |
 | 0016 Object IDs | 🟡 partial | `idGenerator` override unwired; no `client.id`/`pool.id` |
+| 0019 Type system | ❌ not started | the whole vertical — `types` namespace, inference, `types.typed`, per-client `typeHandlers`, `Variant` decode-only, spatial parser |
 | 0017 Errors · 0018 Client lifecycle · 0024 Lifecycle primitives | ✅ done | tarn error-translation lands with the tarn package; minor `ClientClosedError` race-wrap |
 
 ## Done — the kernel
@@ -43,8 +44,7 @@ The promise-/TypeScript-native, hexagonal, single-queryable, `AsyncDisposable` f
 
 These need review and acceptance before implementation:
 
-- **ADR-0019 — SQL type system and type tags. Review first.** It is the keystone: ADR-0009 (sprocs/prepared), the driver `TypeRegistry` (ADR-0010), enriched `ColumnMetadata` (ADR-0007), and later TVPs all build on it.
-- **ADR-0022 — Per-Query lifecycle event surface.** Review.
+- **ADR-0022 — Per-Query lifecycle event surface.** Review next.
 - **ADR-0020 (TVPs) / ADR-0021 (Bulk).** Drafts, and ADR-0001 already defers them to post-v13.0 — review when their phase arrives. Both still use the pre-ADR-0019 `sql.*` tag names; fold the `sql.* → types.*` rename into that review.
 - **ADR-0023 — `RequestRunner`.** Anomaly: it is *implemented* (`packages/core/src/query/runner.ts` + `pool-runner.ts`) but still marked Draft. Quick review → mark Accepted.
 
@@ -72,6 +72,7 @@ Build `tracingChannel` plus the full `mssql:*` channel set. This is a shared dep
 - **Connection strings** (ADR-0015): add `@tediousjs/connection-string`, the core parser, the tedious `connectionStringSchema`, and the `createClient(string, options?)` overload.
 - **Credential/transport round-out** (ADR-0012): tedious `accessToken`/`tokenProvider` (+ re-auth lifecycle, never cached)/`driverNative`, and the nine unmapped `Transport` fields + the `native` escape hatch.
 - **Driver-port round-out** (ADR-0010): emit the `close` Connection event; implement `reset()` database-context restoration (ENVCHANGE tracking).
+- **Type system** (ADR-0019, accepted 2026-06-08): the `types` namespace, value inference, `types.typed`, per-client `typeHandlers`, the driver `TypeRegistry` (ADR-0010), and the dependency-free spatial parser. Prerequisite for Phase 5 and for enriched `ColumnMetadata` (ADR-0007).
 
 ### Phase 4 — packaging
 
@@ -81,7 +82,7 @@ Build `tracingChannel` plus the full `mssql:*` channel set. This is a shared dep
 
 ### Phase 5 — stored procedures & prepared statements (ADR-0009)
 
-Blocked on ADR-0019 acceptance. `Query<T,O>` two-parameter refactor → `sql.procedure()`/`sql.prepare()` builders → `Procedure`/`PreparedStatement` types → driver `prepare()` (ADR-0010) → connection-pinned prepared lifecycle.
+Needs the ADR-0019 type system implemented first (its ADR is accepted). `Query<T,O>` two-parameter refactor → `sql.procedure()`/`sql.prepare()` builders → `Procedure`/`PreparedStatement` types → driver `prepare()` (ADR-0010) → connection-pinned prepared lifecycle.
 
 ### Round-out (fold into the relevant phase)
 
@@ -92,7 +93,7 @@ Blocked on ADR-0019 acceptance. `Query<T,O>` two-parameter refactor → `sql.pro
 ## Open decisions
 
 - **`StateError` vs `TypeError`.** ADR-0007/0008 mandate `TypeError` for meta-before-termination and terminal-on-disposed; the code throws `StateError` (introduced deliberately in ADR-0017). **Proposed:** amend 0007/0008 to bless `StateError` (consistent with the taxonomy). *Pending confirmation.*
-- **Draft reviews.** ADR-0019 first (gates Phase 5); then 0022. *Pending review.*
+- **Draft reviews.** ADR-0019 accepted 2026-06-08; ADR-0022 next, then confirm ADR-0023's status (implemented but marked Draft). *Pending review.*
 - **Sequencing.** Phase 0 first, leading with per-query `.signal()`. *Pending confirmation.*
 
 ## Deferred (post-v13.0)
